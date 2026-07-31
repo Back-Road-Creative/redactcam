@@ -99,10 +99,36 @@ redact_video(
 
 Or on the command line, `--model face=/models/yolov11n-face.onnx` (repeatable).
 
-The bundled defaults point at third-party releases under **their own licences**,
-which are not this project's MIT licence. Check each one before you redistribute
-anything derived from it. Nothing is ever uploaded: the fetch is a plain HTTPS GET
-of a public file, and a non-HTTPS URL is refused.
+### The default weights are copyleft — read this before you deploy
+
+redactcam's own code is MIT. The weights it downloads by default are not, and
+none of them are this project's to relicense:
+
+| Default | Source | Licence |
+| --- | --- | --- |
+| `face` | `akanametov/yolo-face` | **GPL-3.0** |
+| `plate` | `morsetechlab/yolov11-license-plate-detection` | **AGPL-3.0** |
+| `vehicle`, `person` | `aaurelions/yolo11n.onnx` | **none declared** |
+
+Two consequences worth stating plainly:
+
+- **AGPL-3.0 carries a network clause.** Run a service over the plate model and
+  let users interact with it across a network, and that licence asks you to offer
+  them the corresponding source. Private self-hosting is unaffected; offering
+  redaction as a product is not.
+- **The COCO weights declare no licence at all.** That is a reupload with no
+  stated terms, which is not a grant — there is nothing there to rely on. It is
+  most likely derived from an AGPL-3.0 upstream. If licensing matters to you,
+  point `vehicle` and `person` at weights whose terms you have read.
+
+Every default is replaceable and nothing hard-codes a URL at the point of use:
+pass your own `ModelSpec` (or `--model <kind>=<path>`) and redactcam uses it,
+still checksum-verified. Nothing is ever uploaded — the fetch is a plain HTTPS
+GET of a public file, a non-HTTPS URL is refused, and a download is only moved
+into the cache once its SHA-256 matches.
+
+All three default checksums in `models.py` were fetched and verified against the
+live URLs on 2026-07-31.
 
 ## Use it
 
