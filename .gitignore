@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Never commit model weights or footage — both are fetched or supplied at run time.
+*.onnx
+*.pt
+*.pth
+*.mp4
+*.mkv
+*.mov
+*_redactcam.json

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ffmpeg
+        # The mask render and the blur composite shell out to ffmpeg/ffprobe.
+        # Without it one mask test skips itself rather than failing, which would
+        # hide a real regression.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Verify no model weights are vendored
+        # Weights are large, separately licensed, and go stale. They belong behind
+        # a ModelSpec URL + SHA256, never in the tree. Fail here rather than
+        # discovering it in a release artifact.
+        run: |
+          found=$(git ls-files -- '*.onnx' '*.pt' '*.pth' '*.tflite' '*.pb' '*.weights')
+          if [ -n "$found" ]; then
+            echo "model weights committed to the repository:"
+            echo "$found"
+            exit 1
+          fi
+          echo "no vendored weights"
+
+      - name: Verify no recorded media is committed
+        # Every test fixture is generated. A committed clip or photograph is how a
+        # real face ends up in a privacy library's history, where it cannot be
+        # removed by deleting the file.
+        run: |
+          found=$(git ls-files -- '*.mp4' '*.mkv' '*.mov' '*.avi' '*.jpg' '*.jpeg' '*.png' '*.webp' '*.heic')
+          if [ -n "$found" ]; then
+            echo "recorded media committed to the repository:"
+            echo "$found"
+            exit 1
+          fi
+          echo "no recorded media"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -v
