@@ -53,7 +53,7 @@ do not attach footage containing real faces or plates to any report.
 
 - Preferred: GitHub's **Security → Report a vulnerability** tab on this repository
   (Private Vulnerability Reporting).
-- Fallback: email **joepetjr@gmail.com** with `redactcam security` in the subject.
+- Fallback: email **backroadcreativeco@gmail.com** with `redactcam security` in the subject.
 
 Please include the affected version or commit, a description of the impact, and
 reproduction steps or a proof of concept — synthetic, wherever possible.
