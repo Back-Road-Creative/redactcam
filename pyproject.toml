@@ -9,7 +9,7 @@ description = "Tracked face, licence-plate, occupant and person redaction for vi
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Joe Petrucelli", email = "joepetjr@gmail.com" }]
+authors = [{ name = "Joe Petrucelli", email = "backroadcreativeco@gmail.com" }]
 keywords = ["privacy", "redaction", "anonymisation", "blur", "video", "gdpr", "yolo", "onnx"]
 classifiers = [
     "Development Status :: 4 - Beta",
