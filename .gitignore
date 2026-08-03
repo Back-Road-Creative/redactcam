@@ -8,6 +8,7 @@ venv/
 .mypy_cache/
 dist/
 build/
+*.spec
 *.egg-info/
 .coverage
 htmlcov/
