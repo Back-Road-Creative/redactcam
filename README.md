@@ -130,6 +130,50 @@ into the cache once its SHA-256 matches.
 All three default checksums in `models.py` were fetched and verified against the
 live URLs on 2026-07-31.
 
+### Windows installer
+
+Each release also carries `redactcam-setup-<version>.exe` on its
+[releases page](https://github.com/Back-Road-Creative/redactcam/releases) —
+redactcam frozen into one executable, so it needs no Python. It installs into
+Program Files, appends that directory to the system `PATH`, and registers an
+uninstaller in Add/Remove Programs. Open a *new* terminal afterwards; one that
+was already open still holds the old `PATH`. It is a large download: opencv and
+onnxruntime are frozen into it.
+
+Three things to know before downloading it.
+
+**ffmpeg is not bundled, and redactcam cannot render anything without it.** The
+mask render and the blur composite shell out to `ffmpeg` and `ffprobe`. An
+ffmpeg build dwarfs redactcam, and which licence a given build falls under
+depends on how it was configured, so shipping one inside this installer would
+be both large and a claim this project is not in a position to make. Install it
+yourself — this puts both on `PATH`:
+
+```powershell
+winget install -e --id Gyan.FFmpeg
+```
+
+`choco install ffmpeg` works too. Confirm with `ffmpeg -version`.
+
+**No model weights are bundled either, so the first run needs a network
+connection.** The frozen executable resolves models exactly the way the pip
+install does: roughly 110 MB of ONNX files fetched once over HTTPS,
+checksum-verified, and cached under `C:\Users\<you>\.cache\redactcam\models`. A
+machine that will never have internet access needs the files supplied instead —
+`--model face=C:\models\yolov11n-face.onnx`, repeatable, as above. Everything in
+[the copyleft section](#the-default-weights-are-copyleft--read-this-before-you-deploy)
+applies to an installer user too: the defaults are GPL-3.0, AGPL-3.0 and
+undeclared, and none of them are this project's to relicense.
+
+**The build is not code-signed.** There is no code-signing certificate for this
+project, so Windows cannot show you a publisher. Expect the blue *"Windows
+protected your PC"* box — "Microsoft Defender SmartScreen prevented an
+unrecognized app from starting" — which runs the installer only after **More
+info** → **Run anyway**, and expect your browser to warn during the download.
+That is simply what an unsigned binary looks like; it is not evidence the file
+is safe. If you would rather not make that call, `pip install redactcam` needs
+no installer.
+
 ## Use it
 
 ### Command line

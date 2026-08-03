@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Windows installer. Pushing a `v*` tag builds a PyInstaller one-file executable
+  on `windows-latest`, wraps it with Inno Setup, and attaches
+  `redactcam-setup-<version>.exe` to that tag's release. It installs into Program
+  Files, appends that directory to the machine `PATH` and registers an
+  uninstaller. Neither ffmpeg nor any model weight is bundled — the installer's
+  finish page and the README both say so, since a frozen redactcam with no ffmpeg
+  on `PATH` and no network on first run cannot do anything.
+
 ## 0.1.0
 
 First release.
