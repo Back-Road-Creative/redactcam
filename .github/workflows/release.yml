@@ -2,9 +2,20 @@ name: Release
 
 # Pushing a v* tag builds the Windows installer and attaches it to that tag's
 # GitHub release, creating the release if it does not exist yet.
+#
+# workflow_dispatch runs the identical build and stops short of publishing,
+# leaving the installer as a build artifact instead. Every Windows-only step --
+# the PyInstaller freeze, the ISCC compile, the Inno install -- is unrunnable
+# anywhere outside this runner, so without a dry run the first proof that any of
+# it works would be a public release that might already be broken.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v (must match pyproject.toml)"
+        required: true
 
 permissions:
   contents: write # gh release create / upload
@@ -20,10 +31,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Take the version from the tag
+      - name: Take the version from the tag, or from the dispatch input
         run: |
-          "VERSION=$($env:GITHUB_REF_NAME -replace '^v', '')" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $v = "${{ inputs.version }}"
+          } else {
+            $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Refuse a tag that disagrees with pyproject.toml
         # Otherwise the installer would announce a version the packaged code
@@ -66,7 +81,17 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc - Inno Setup's install layout changed" }
           & $iscc /DAppVersion=$env:VERSION installer\redactcam.iss
 
+      - name: Keep the installer as an artifact (dry run only)
+        # A dry run proves the build; it deliberately publishes nothing.
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: redactcam-setup-${{ env.VERSION }}
+          path: dist/redactcam-setup-${{ env.VERSION }}.exe
+          if-no-files-found: error
+
       - name: Attach the installer to the release
+        if: github.event_name == 'push'
         # gh ships on the runner, so this needs no third-party action to pin,
         # audit and keep current — softprops/action-gh-release would buy only
         # the create-if-missing branch written out below.
