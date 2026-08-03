@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redactcam"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tracked face, licence-plate, occupant and person redaction for video, with an independent coverage verifier."
 readme = "README.md"
 requires-python = ">=3.11"
