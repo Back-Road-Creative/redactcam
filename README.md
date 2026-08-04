@@ -197,6 +197,24 @@ encode), `--fresh` ignores the cached timeline sidecar and re-detects,
 `--blur-strength` sets the boxblur radius at 1920 px wide (scaled to the real
 width).
 
+`--check-deps` takes no input and answers one question: did the native
+extensions load? It imports OpenCV and onnxruntime and builds a real ONNX
+session options object, then prints their versions and the available execution
+providers. It is most useful after installing the Windows build, where those two
+are bundled by PyInstaller rather than by pip, and where a packaging miss would
+otherwise surface on your first real video:
+
+```console
+$ redactcam --check-deps
+opencv          5.0.0
+onnxruntime     1.28.0
+providers       AzureExecutionProvider, CPUExecutionProvider
+session options intra=1 inter=1
+```
+
+It exits non-zero and names the module if one fails to load, and needs no model
+weights, so it will not trigger the first-run download.
+
 ### Python
 
 ```python
