@@ -7,6 +7,9 @@
 ;   ISCC.exe /DAppVersion=0.1.0 installer\redactcam.iss
 ;
 ; See .github/workflows/release.yml for the whole sequence.
+;
+; Keep this file pure ASCII. Inno reads a BOM-less script as ANSI, so an em
+; dash or a curly quote pasted in from prose becomes mojibake in the wizard.
 
 #define AppName "redactcam"
 #define AppURL "https://github.com/Back-Road-Creative/redactcam"
@@ -47,14 +50,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; edit below without a logoff.
 ChangesEnvironment=yes
 UninstallDisplayName={#AppName} {#AppVersion}
-UninstallDisplayIcon={app}\redactcam.exe
+UninstallDisplayIcon={app}\{#AppName}.exe
 OutputDir=..\dist
-OutputBaseFilename=redactcam-setup-{#AppVersion}
+OutputBaseFilename={#AppName}-setup-{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 
 [Files]
-Source: "..\dist\redactcam.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#AppName}.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; Append the install directory to the machine PATH. The Check skips the append
