@@ -19,7 +19,7 @@ def _parser() -> argparse.ArgumentParser:
             "then verify the blur actually landed before rendering."
         ),
     )
-    p.add_argument("input", type=Path, help="source video")
+    p.add_argument("input", type=Path, nargs="?", help="source video")
     p.add_argument("-o", "--output", type=Path, help="output video (default: <input>_redacted.mp4)")
     p.add_argument(
         "--work-dir",
@@ -58,7 +58,51 @@ def _parser() -> argparse.ArgumentParser:
         help="boxblur radius at 1920 px wide, scaled to the real width (default: 12)",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="log every stage")
+    p.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="load the native extensions, report their versions, and exit; takes no input",
+    )
     return p
+
+
+def _session_options_for_check(intra_threads: int):
+    """Indirection so the dependency check can be driven in a test on a machine
+    where onnxruntime is deliberately absent."""
+    from .detect import _session_options
+
+    return _session_options(intra_threads)
+
+
+def _check_deps() -> int:
+    """Load the native extensions, use them, and say what loaded.
+
+    This is for the frozen Windows build. PyInstaller resolves OpenCV and
+    onnxruntime through hooks, and a miss surfaces only when someone runs a real
+    detection -- while the release smoke test was ``--help``, which never touches
+    onnxruntime, because detect.py imports it inside a function. The installer
+    could therefore ship an executable that could not detect anything with every
+    gate green.
+
+    Importing alone would not prove much, so this builds a real SessionOptions
+    through the same helper the detectors call. It needs no video and no model
+    file on purpose: the weights are a ~110 MB download and a release runner has
+    neither.
+    """
+    try:
+        import cv2
+
+        opts = _session_options_for_check(1)
+        import onnxruntime as ort
+    except ImportError as exc:
+        print(f"redactcam: a native dependency did not load: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"opencv          {cv2.__version__}")
+    print(f"onnxruntime     {ort.__version__}")
+    print(f"providers       {', '.join(ort.get_available_providers())}")
+    print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
+    return 0
 
 
 def _models(pairs: list[str]) -> dict[str, ModelSpec]:
@@ -74,11 +118,16 @@ def _models(pairs: list[str]) -> dict[str, ModelSpec]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    if args.check_deps:
+        return _check_deps()
+    if args.input is None:
+        parser.error("input is required")
     try:
         result = redact_video(
             args.input,

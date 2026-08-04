@@ -69,7 +69,16 @@ jobs:
         run: python -m PyInstaller --onefile --console --name redactcam installer/redactcam_launcher.py
 
       - name: Smoke-test the frozen executable
-        run: dist\redactcam.exe --help
+        # --help proves only that the executable starts. detect.py imports
+        # onnxruntime inside a function, so a hook miss on the native extensions
+        # stayed invisible here and surfaced on a user's first real detection --
+        # the comment above says the hooks were verified by hand once, which is
+        # exactly the kind of check that goes stale without a gate. --check-deps
+        # loads OpenCV and onnxruntime and builds a real SessionOptions, needing
+        # no video and no ~110 MB weights download.
+        run: |
+          dist\redactcam.exe --help
+          dist\redactcam.exe --check-deps
 
       - name: Install Inno Setup
         # Installed, not assumed: a runner image that quietly drops a
