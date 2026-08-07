@@ -57,7 +57,7 @@ failure raises `CoverageError` instead of producing a file.
 ## Install
 
 ```bash
-pip install redactcam
+pip install git+https://github.com/Back-Road-Creative/redactcam
 ```
 
 Requires Python 3.11 or newer, and an **`ffmpeg`/`ffprobe` binary on your PATH**
@@ -171,8 +171,8 @@ protected your PC"* box — "Microsoft Defender SmartScreen prevented an
 unrecognized app from starting" — which runs the installer only after **More
 info** → **Run anyway**, and expect your browser to warn during the download.
 That is simply what an unsigned binary looks like; it is not evidence the file
-is safe. If you would rather not make that call, `pip install redactcam` needs
-no installer.
+is safe. If you would rather not make that call, `pip install git+https://github.com/Back-Road-Creative/redactcam`
+needs no installer.
 
 ## Use it
 
