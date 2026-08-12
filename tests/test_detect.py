@@ -5,6 +5,7 @@ and detectors stubbed with deterministic stand-ins. Nothing in this suite needs
 a model file, a network connection, or a photograph of a real person.
 """
 
+import json
 from types import SimpleNamespace
 
 import cv2
@@ -625,3 +626,100 @@ class TestPlateBoostCadence:
         assert next_boost_run(0, 0.0, 8, 6, plate_seen=True) == 6
         assert next_boost_run(0, 0.0, 8, 6, plate_seen=False) == 0  # neither trigger
         assert next_boost_run(3, 0.0, 0, 6, plate_seen=True) == 2  # disabled → only decays
+
+
+class TestDetectionCheckpoint:
+    """Crash-resume for the detection pass.
+
+    A GPU fault killed a 2h55m blur pass mid-decode on 2026-08-12 (onnxruntime
+    threw CUDA 999 out of a C++ destructor, so ``std::terminate`` aborted the
+    process before Python could react). ``detect_and_track`` was all-or-nothing
+    across one decode pass, so the restart repaid the full pass from frame 0.
+
+    The tracker is NEVER reset by checkpointing — a checkpoint only writes a
+    snapshot of what the still-running tracker has confirmed so far. That is why
+    ``test_checkpointing_does_not_change_an_uninterrupted_result`` is the load-
+    bearing test: turning this on must be invisible unless a run actually dies.
+    Only a RESUME starts a fresh tracker, and it re-decodes an overlap window
+    before the resume point and UNIONs the result over the checkpointed boxes —
+    union, not replace, because over-blur is safe and under-blur is a leak.
+    """
+
+    KW = dict(
+        sample_fps=3.0,
+        plate_model_path=None,
+        tile_px=9999,
+        track_downscale=1,
+        track_lk_win=15,
+        track_lk_levels=2,
+        track_max_horizon_frames=60,
+    )
+    # 24-frame clips: the production 90-frame (3s) overlap would rewind past the
+    # start and re-decode everything, hiding whether a resume skips any work.
+    CKPT = dict(checkpoint_every_frames=8, checkpoint_overlap_frames=2)
+
+    def test_checkpoint_is_written_during_the_pass(self, tmp_path):
+        video = _make_moving_video(tmp_path)  # 24 frames @ 12 fps
+        ckpt = tmp_path / "detect.ckpt.json"
+        detect_and_track(video, checkpoint_path=ckpt, **self.CKPT, **self.KW)
+        assert ckpt.exists(), "no checkpoint written across a 24-frame pass"
+        state = json.loads(ckpt.read_text())
+        assert state["frames_done"] >= 8
+        assert state["frame_boxes"], "checkpoint carries no boxes"
+
+    def test_checkpointing_does_not_change_an_uninterrupted_result(self, tmp_path):
+        """Negative control: the feature is invisible when nothing crashes."""
+        video = _make_moving_video(tmp_path)
+        plain, n_plain, nf_plain, _ = detect_and_track(video, **self.KW)
+        withck, n_ck, nf_ck, _ = detect_and_track(
+            video, checkpoint_path=tmp_path / "c.json", **self.CKPT, **self.KW
+        )
+        assert n_ck == n_plain and nf_ck == nf_plain
+        assert sorted(withck) == sorted(plain)
+        for frame in plain:
+            assert withck[frame] == plain[frame], f"frame {frame} differs with checkpointing on"
+
+    def test_resume_skips_the_frames_already_done(self, tmp_path):
+        video = _make_moving_video(tmp_path)
+        ckpt = tmp_path / "c.json"
+        detect_and_track(video, checkpoint_path=ckpt, **self.CKPT, **self.KW)
+        _, _, nf_full, _ = detect_and_track(video, **self.KW)
+        # Second call resumes from the checkpoint: it must re-detect strictly
+        # less than a cold pass, or no work was actually skipped.
+        _, _, nf_resumed, _ = detect_and_track(video, checkpoint_path=ckpt, **self.CKPT, **self.KW)
+        assert nf_resumed < nf_full, f"resume re-detected {nf_resumed} vs full {nf_full}"
+
+    def test_resume_still_covers_every_frame(self, tmp_path):
+        """The whole point: a resumed pass may not leave a frame unblurred."""
+        video = _make_moving_video(tmp_path)
+        ckpt = tmp_path / "c.json"
+        detect_and_track(video, checkpoint_path=ckpt, **self.CKPT, **self.KW)
+        resumed, n_frames, _, _ = detect_and_track(
+            video, checkpoint_path=ckpt, **self.CKPT, **self.KW
+        )
+        full, _, _, _ = detect_and_track(video, **self.KW)
+        assert n_frames == 24
+        missing = [f for f in full if f not in resumed or not resumed[f]]
+        assert not missing, f"resumed pass lost blur on frames {missing}"
+
+    def test_a_checkpoint_from_another_video_is_ignored(self, tmp_path):
+        other = _make_moving_video(tmp_path)
+        ckpt = tmp_path / "c.json"
+        detect_and_track(other, checkpoint_path=ckpt, **self.CKPT, **self.KW)
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        different = _make_moving_video(sub, n_frames=16, x0=60)
+        boxes, n_frames, _, _ = detect_and_track(
+            different, checkpoint_path=ckpt, **self.CKPT, **self.KW
+        )
+        assert n_frames == 16, "resumed against a different video's checkpoint"
+        assert max(boxes) < 16
+
+    def test_a_corrupt_checkpoint_degrades_to_a_full_pass(self, tmp_path):
+        video = _make_moving_video(tmp_path)
+        ckpt = tmp_path / "c.json"
+        ckpt.write_text("{not json at all")
+        boxes, n_frames, _, _ = detect_and_track(
+            video, checkpoint_path=ckpt, **self.CKPT, **self.KW
+        )
+        assert n_frames == 24 and len(boxes) == 24

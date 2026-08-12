@@ -14,7 +14,9 @@ simply disabled, and the caller decides whether that is fatal.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -649,6 +651,81 @@ def next_boost_run(
     return nxt
 
 
+CHECKPOINT_VERSION = 1
+# Frames re-decoded before a resume point. A fresh tracker needs a run-up to
+# re-confirm a face already mid-track when the process died; without it the
+# frames just after the resume point lose their blur. The re-derived boxes are
+# UNIONed over the checkpointed ones — over-blur is safe, under-blur is a leak.
+CHECKPOINT_OVERLAP_FRAMES = 90
+
+
+def _video_fingerprint(path: str | Path) -> str:
+    """Cheap identity for a video file. A full hash of a 100 GB concat costs
+    more than the pass being checkpointed, so size+mtime is the trade."""
+    st = os.stat(path)
+    return f"{st.st_size}:{int(st.st_mtime)}"
+
+
+def _union_boxes(base: dict[int, list[Box]], extra: dict[int, list[Box]]) -> dict[int, list[Box]]:
+    """Merge two frame→boxes maps, keeping every distinct box on each frame."""
+    merged = {frame: list(boxes) for frame, boxes in base.items()}
+    for frame, boxes in extra.items():
+        if frame not in merged:
+            merged[frame] = list(boxes)
+            continue
+        seen = {tuple(b) for b in merged[frame]}
+        merged[frame].extend(b for b in boxes if tuple(b) not in seen)
+    return merged
+
+
+def _load_checkpoint(path: Path, fingerprint: str) -> tuple[dict[int, list[Box]], int] | None:
+    """Checkpointed state, or None when absent, unreadable, or for another video.
+
+    Never raises: a checkpoint is an optimisation, and a bad one must cost a
+    re-run, not the run.
+    """
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or state.get("version") != CHECKPOINT_VERSION:
+        return None
+    if state.get("source") != fingerprint:
+        return None
+    try:
+        boxes = {
+            int(frame): [tuple(b) for b in box_list]
+            for frame, box_list in state["frame_boxes"].items()
+        }
+        return boxes, int(state["frames_done"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _write_checkpoint(
+    path: Path,
+    fingerprint: str,
+    frames_done: int,
+    frame_boxes: dict[int, list[Box]],
+) -> None:
+    """Write temp-then-rename so a process killed mid-write cannot leave a
+    truncated file that parses as valid. Never raises — losing a checkpoint is
+    strictly better than losing the pass that is writing it."""
+    payload = {
+        "version": CHECKPOINT_VERSION,
+        "source": fingerprint,
+        "frames_done": frames_done,
+        "frame_boxes": {str(f): [list(b) for b in boxes] for f, boxes in frame_boxes.items()},
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Could not write detection checkpoint %s: %s", path, exc)
+
+
 def detect_and_track(
     video_path: str | Path,
     *,
@@ -700,6 +777,9 @@ def detect_and_track(
     person_conf: float = 0.35,
     person_min_height_frac: float = 0.0,
     plate_threads: int = 0,
+    checkpoint_path: str | Path | None = None,
+    checkpoint_every_frames: int = 0,
+    checkpoint_overlap_frames: int = CHECKPOINT_OVERLAP_FRAMES,
 ) -> tuple[dict[int, list[Box]], int, int, int]:
     """One decode pass producing DENSE per-frame privacy boxes.
 
@@ -847,6 +927,28 @@ def detect_and_track(
     tiles: list[tuple[int, int, int, int]] | None = None
     n_face = n_plate = 0
     frame_idx = 0
+    # Resume state. `resumed` holds boxes confirmed before the process died; the
+    # live tracker below is never seeded from it (track internals are not
+    # serialisable), so the overlap re-decode is what repairs the seam.
+    # n_face/n_plate deliberately stay at 0: they count detections THIS call
+    # performed, so a resumed pass reports its own work rather than a total it
+    # cannot verify. The service logs them and gates nothing on them.
+    ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    resumed: dict[int, list[Box]] = {}
+    fingerprint = ""
+    if ckpt_path is not None:
+        fingerprint = _video_fingerprint(video_path)
+        restored = _load_checkpoint(ckpt_path, fingerprint)
+        if restored is not None:
+            resumed, frames_done = restored
+            frame_idx = max(0, frames_done - max(0, checkpoint_overlap_frames))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            logger.info(
+                "Resuming detection at frame %d (%d frames checkpointed)",
+                frame_idx,
+                frames_done,
+            )
+    last_checkpoint = frame_idx
     # Adaptive plate cadence: between sparse samples a plate accelerating through a
     # close pass moves farther per frame than flow can follow, so the box lags and
     # the plate escapes (readable). While a plate track is fast, force plate-only
@@ -956,6 +1058,21 @@ def detect_and_track(
                 plate_seen=len(plates) > 0 or len(vehicles) > 0,
             )
             frame_idx += 1
+            # Snapshot only — the tracker keeps running, so an uninterrupted
+            # pass returns exactly what it would have without checkpointing.
+            if (
+                ckpt_path is not None
+                and checkpoint_every_frames > 0
+                and tracker is not None
+                and frame_idx - last_checkpoint >= checkpoint_every_frames
+            ):
+                snapshot = tracker.confirmed_frame_boxes(
+                    face_confirm_min_detections, interpolate=True, pre_roll=pre_roll_frames
+                )
+                _write_checkpoint(
+                    ckpt_path, fingerprint, frame_idx, _union_boxes(resumed, snapshot)
+                )
+                last_checkpoint = frame_idx
     finally:
         cap.release()
 
@@ -971,4 +1088,6 @@ def detect_and_track(
         if tracker is not None
         else {}
     )
+    if resumed:
+        frame_boxes = _union_boxes(resumed, frame_boxes)
     return frame_boxes, frame_idx, n_face, n_plate

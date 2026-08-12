@@ -356,6 +356,13 @@ Everything below is importable straight from `redactcam`.
 builders. `YoloDetector`, `CenterFaceDetector`, `FrameRegions`, `Box`, `iou()`,
 `ModelUnavailableError`.
 
+On a multi-hour video, pass `detect_and_track(checkpoint_path=…,
+checkpoint_every_frames=…)` so a crash costs one checkpoint interval instead of
+the whole pass. The tracker is never reset by a checkpoint, so an uninterrupted
+run is unchanged; a resume re-decodes `checkpoint_overlap_frames` (default 90)
+before the resume point and unions those boxes over the checkpointed ones. A
+checkpoint belonging to another video, or a corrupt one, is ignored.
+
 **Tracking** — `TrackManager`, `Track`.
 
 **Timeline** — `build_timeline()`, `BlurTimeline`, `dilate_box()`,

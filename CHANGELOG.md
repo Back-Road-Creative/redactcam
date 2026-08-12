@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `detect_and_track(checkpoint_path=…, checkpoint_every_frames=…)` makes a long
+  detection pass crash-resumable. Previously the pass was all-or-nothing across
+  one decode: a GPU fault 2h55m into a 3h17m video (onnxruntime raising CUDA 999
+  from a C++ destructor, so `std::terminate` aborted the process before Python
+  could react) cost the entire pass, and the restart began again at frame 0.
+  A checkpoint is a periodic *snapshot* — the tracker is never reset — so an
+  uninterrupted run returns byte-for-byte what it always did. Only a resume
+  starts a fresh tracker, re-decoding `checkpoint_overlap_frames` (default 90,
+  3s at 30fps) before the resume point so a face already mid-track when the
+  process died is re-confirmed; those boxes are UNIONed over the checkpointed
+  ones, never substituted, because over-blur is safe and under-blur is a leak.
+  A checkpoint written for a different video, or a corrupt one, is ignored and
+  costs a full pass rather than a wrong mask. `n_face`/`n_plate` count the
+  detections performed by that invocation, so a resumed pass reports its own
+  work rather than a total it cannot verify.
+
 ## 0.1.1 - 2026-08-03
 
 ### Added
