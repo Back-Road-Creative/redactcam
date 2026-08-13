@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- Two objects visible at once no longer collapse onto one track, leaving one of
+  them unblurred. Association had no per-frame exclusivity — nothing marked a
+  track as already matched — and its center-distance fallback gate was sized by
+  the LARGER of detection/track box, which for a near 4K car reaches 840-1210 px
+  across the frame. So a second car's detection matched the first car's track and
+  moved it there; one track emits one box, and which car it landed on was decided
+  by detection order, alternating frame to frame. Worse, plate corroboration
+  rides the track, so a stolen track carried its licence to the wrong car and
+  blurred that one instead. Measured on a 353,861-frame dashcam day master: 13 of
+  552 plate-corroborated vehicle-frames had an exposed occupant cabin. Now one
+  detection claims one track — IoU matches settle first, then the distance
+  fallback over unclaimed tracks only, sized by the SMALLER box — and a detection
+  with no track left to claim spawns its own. The flat `assoc_min_gate` floor,
+  which is what actually carries the tiny-distant-face case, is unchanged, as is
+  a healthy single-object pass. This adds no gap-fill: every new box is a real
+  track snapped to its own detection and moved by its own optical flow.
+  Brief passes that the detector never sees at all are a separate defect.
+
 ### Added
 
 - `detect_and_track(checkpoint_path=…, checkpoint_every_frames=…)` makes a long
