@@ -366,7 +366,14 @@ class TrackManager:
             and frame_idx - t.last_detect_frame <= self._coast_horizon(t)
         )
 
-    def _associate(self, box: Box, cls: str) -> Track | None:
+    def _associate(
+        self,
+        box: Box,
+        cls: str,
+        claimed: frozenset[int] = frozenset(),
+        *,
+        iou_only: bool = False,
+    ) -> Track | None:
         """Best existing track for a detection: IoU first (tight), then — when IoU
         fails across fast/small motion — a center-distance gate, so the SAME fast
         face re-associates to its track instead of spawning a duplicate that then
@@ -374,25 +381,29 @@ class TrackManager:
         assoc_min_gate) + track speed``: the size term widens it for big (near)
         faces, while the flat floor covers a SMALL distant face whose tight box is
         tiny yet still moves tens of px between sparse detections (its size term
-        alone would be under the inter-detection motion). Greedy / order-stable →
-        deterministic. ``assoc_gain``/``assoc_min_gate`` both 0 → IoU-only."""
+        alone would be under the inter-detection motion). The size term takes the
+        SMALLER of the two diagonals — a big near car's track must not reach a
+        whole frame across and swallow a small distant car's detection. Tracks in
+        ``claimed`` are already spoken for this frame and are skipped, so two
+        objects can never collapse onto one. Greedy / order-stable → deterministic.
+        ``assoc_gain``/``assoc_min_gate`` both 0, or ``iou_only`` → IoU-only."""
         best, best_iou = None, self.iou_match
         for t in self._tracks:
-            if t.cls != cls:
+            if t.cls != cls or t.track_id in claimed:
                 continue
             score = _iou(box, t.box)
             if score >= best_iou:
                 best, best_iou = t, score
-        if best is not None or (self.assoc_gain <= 0 and self.assoc_min_gate <= 0):
+        if best is not None or iou_only or (self.assoc_gain <= 0 and self.assoc_min_gate <= 0):
             return best
         bc = self._center(box)
         bdiag = (box[2] ** 2 + box[3] ** 2) ** 0.5
         best, best_d = None, None
         for t in self._tracks:
-            if t.cls != cls:
+            if t.cls != cls or t.track_id in claimed:
                 continue
             tdiag = (t.box[2] ** 2 + t.box[3] ** 2) ** 0.5
-            gate = max(self.assoc_gain * max(bdiag, tdiag), self.assoc_min_gate) + t.speed
+            gate = max(self.assoc_gain * min(bdiag, tdiag), self.assoc_min_gate) + t.speed
             d = self._dist(bc, self._center(t.box))
             if d <= gate and (best_d is None or d < best_d):
                 best, best_d = t, d
@@ -469,11 +480,26 @@ class TrackManager:
 
     def _assimilate(self, frame_idx: int, small: np.ndarray, detections) -> None:
         """Snap a matching track to each detection (resets flow drift) or spawn
-        a new track, then retire any ghost a fresh detection supersedes. Greedy in
-        detection order → deterministic."""
-        for cls, raw in detections:
-            box = self._clamp(raw)
-            best = self._associate(box, cls)
+        a new track, then retire any ghost a fresh detection supersedes. ONE
+        detection ↔ ONE track: a track another detection already claimed this frame
+        is off the table, so two co-present objects cannot collapse onto a single
+        track — which emits a single box and leaves one of them bare. Two passes so
+        tight IoU matches settle FIRST; otherwise a far detection's loose distance
+        match could steal a track whose own detection overlaps it. Greedy in
+        detection order within each pass → deterministic."""
+        boxes = [(cls, self._clamp(raw)) for cls, raw in detections]
+        claimed: set[int] = set()
+        matched: list[Track | None] = []
+        for cls, box in boxes:
+            best = self._associate(box, cls, frozenset(claimed), iou_only=True)
+            if best is not None:
+                claimed.add(best.track_id)
+            matched.append(best)
+        for (cls, box), best in zip(boxes, matched, strict=True):
+            if best is None:
+                best = self._associate(box, cls, frozenset(claimed))
+                if best is not None:
+                    claimed.add(best.track_id)
             if best is not None:
                 best.box = box
                 best.points = self._seed(box, small)
@@ -489,6 +515,7 @@ class TrackManager:
                     "frames": [],
                     "anchors": [frame_idx],
                 }
+                claimed.add(self._nid)  # a fresh track is this detection's, too
                 self._nid += 1
         self._retire_superseded(frame_idx)
 

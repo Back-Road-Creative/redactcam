@@ -275,6 +275,40 @@ def test_associate_min_gate_floors_tiny_box():
     assert tm._associate(moved, "face") is None
 
 
+def test_two_objects_in_one_frame_never_share_a_track():
+    """Two cars visible at once are two tracks. One track emits ONE box, so a
+    shared track leaves whichever car it is not currently snapped to entirely
+    unblurred — and the steal alternates frame to frame as the detection order
+    changes. Geometry mirrors the production leak, scaled to this frame."""
+    tm = TrackManager(W, H, downscale=1, assoc_motion_gain=1.2, cabin_frac=0.6)
+    near = (230, 30, 230, 160)  # a close car
+    far = (20, 70, 70, 60)  # another car, further up the road
+    assert _iou(near, far) == 0.0  # genuinely two objects, not one seen twice
+    boxes = tm.step(0, _frame(240, 135), [("vehicle", near), ("vehicle", far)])
+    assert len(tm._tracks) == 2, "two co-present cars collapsed onto one track"
+    assert len(boxes) == 2
+
+
+def test_assoc_gate_scales_with_the_smaller_box():
+    """The motion gate is sized by the SMALLER of detection/track box, so a big
+    near car's track cannot reach across the frame and swallow a small distant
+    car's detection. The flat floor — what actually carries the tiny-distant-face
+    case the gate was tuned for — is untouched."""
+    tm = TrackManager(W, H, downscale=1, assoc_motion_gain=1.2, assoc_min_gate=72)
+    tm._tracks = [Track(0, "vehicle", (230, 30, 230, 160), None, 0)]
+    assert tm._associate((20, 70, 70, 60), "vehicle") is None
+    tm._tracks = [Track(0, "face", (76, 111, 48, 48), None, 0, speed=4.0)]
+    assert tm._associate((136, 111, 48, 48), "face") is tm._tracks[0]  # unchanged
+
+
+def test_a_claimed_track_cannot_be_stolen_by_a_second_detection():
+    """One detection ↔ one track, per frame: a track already snapped to its own
+    detection this frame is off the table for every later one."""
+    tm = TrackManager(W, H, downscale=1, assoc_motion_gain=1.2)
+    tm._tracks = [Track(0, "vehicle", (230, 30, 230, 160), None, 0)]
+    assert tm._associate((240, 40, 230, 160), "vehicle", frozenset({0})) is None
+
+
 def test_retire_superseded_ghost():
     """A coasting ghost (a face holding a stale box, no live flow points)
     is retired when a freshly-detected track of the same class overlaps it — the

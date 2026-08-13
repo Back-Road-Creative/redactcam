@@ -451,6 +451,55 @@ class TestDetectAndTrack:
         fb0, *_ = detect_and_track(video, track_cabin_frac=0.0, vehicle_model_path="x", **kw)
         assert not any(b == cabin for boxes in fb0.values() for b in boxes)
 
+    def test_two_co_present_cars_are_both_cabin_blurred_every_frame(
+        self, tmp_path, monkeypatch
+    ):
+        """Two corroborated cars in view at once both keep their cabin blurred on
+        EVERY frame. Sharing one track emits one cabin box, so the other car's
+        occupants ride exposed — the production leak, end to end."""
+        near, far = (230, 30, 230, 160), (20, 70, 70, 60)
+
+        class _TwoVehicles:
+            def detect(self, frame, conf):
+                return [near, far]
+
+        monkeypatch.setattr(
+            detect, "build_vehicle_detector", lambda *a, **k: _TwoVehicles()
+        )
+        # A plate inside EACH car → both corroborated, so neither drop can be a
+        # corroboration artefact.
+        monkeypatch.setattr(
+            detect, "detect_plates", lambda *a, **k: [(330, 150, 30, 12), (45, 115, 20, 8)]
+        )
+        n_frames = 24
+        fb, *_ = detect_and_track(
+            _make_moving_video(tmp_path, n_frames=n_frames),
+            track_cabin_frac=0.5,
+            vehicle_model_path="x",
+            sample_fps=3.0,
+            plate_model_path=None,
+            tile_px=9999,
+            track_downscale=1,
+            track_lk_win=15,
+            track_lk_levels=2,
+            track_max_horizon_frames=60,
+            plate_boost_speed_px=8,  # production cadence: every frame is a sample
+        )
+
+        def covers(b, pt):
+            return b[0] <= pt[0] <= b[0] + b[2] and b[1] <= pt[1] <= b[1] + b[3]
+
+        # Centre of each car's cabin band. Point coverage, not box equality, so a
+        # pixel of legitimate flow drift can't make this flaky — while a missing
+        # car cannot pass.
+        occupants = ((345, 70), (55, 85))
+        bare = [
+            f
+            for f in range(n_frames)
+            if not all(any(covers(b, pt) for b in fb.get(f, [])) for pt in occupants)
+        ]
+        assert not bare, f"a co-present car was left unblurred on frames {bare}"
+
     def test_person_blurred_as_whole_box_no_corroboration(self, tmp_path, monkeypatch):
         """A COCO person — someone standing beside the camera, a pedestrian — is
         blurred as a WHOLE box, not just a face, and needs no plate corroboration
