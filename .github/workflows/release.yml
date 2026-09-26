@@ -55,7 +55,7 @@ jobs:
       - name: Install redactcam and PyInstaller
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . pyinstaller==6.21.0
+          python -m pip install ".[cpu]" pyinstaller==6.21.0
 
       - name: Build the one-file executable
         # redactcam's entry point is a module function, so PyInstaller is aimed

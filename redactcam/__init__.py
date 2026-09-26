@@ -15,9 +15,11 @@ Five stages, each usable on its own:
 from .apply import apply_blur, blur_filter_complex, blur_radius
 from .coverage import CoverageReport, Leak, cabin_region, plate_inside, verify_cabin_coverage
 from .detect import (
+    ALLOW_CPU_ENV,
     Box,
     CenterFaceDetector,
     FrameRegions,
+    GpuProviderUnavailableError,
     ModelUnavailableError,
     YoloDetector,
     build_detectors,
@@ -26,9 +28,11 @@ from .detect import (
     build_person_detector,
     build_plate_detector,
     build_vehicle_detector,
+    check_inference_providers,
     detect_and_track,
     detect_image,
     detect_regions,
+    gpu_build_installed,
     iou,
 )
 from .mask import active_boxes_at, materialize_mask_video, render_mask_frame
@@ -57,7 +61,7 @@ from .timeline import (
 )
 from .track import Track, TrackManager
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -76,6 +80,10 @@ __all__ = [
     "YoloDetector",
     "CenterFaceDetector",
     "ModelUnavailableError",
+    "GpuProviderUnavailableError",
+    "ALLOW_CPU_ENV",
+    "check_inference_providers",
+    "gpu_build_installed",
     "detect_regions",
     "detect_and_track",
     "detect_image",

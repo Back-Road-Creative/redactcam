@@ -32,6 +32,69 @@ class ModelUnavailableError(RuntimeError):
     detector that finds nothing, because a silent no-op here ships faces."""
 
 
+class GpuProviderUnavailableError(RuntimeError):
+    """The CUDA build of onnxruntime is installed but ``CUDAExecutionProvider``
+    is not usable — the CPU ``onnxruntime`` wheel was installed over it (both
+    wheels own the ``onnxruntime/`` package directory; the last install wins),
+    or the CUDA runtime libraries did not load. Raised instead of falling back
+    to CPU, because that fallback is silent (ORT logs a warning nobody reads)
+    and ~19× slower: on 2026-09-25 it turned a four-hour blur pass into a
+    multi-day one with no line in the log saying why. Set ``REDACTCAM_ALLOW_CPU=1``
+    to accept the CPU path knowingly."""
+
+
+ALLOW_CPU_ENV = "REDACTCAM_ALLOW_CPU"
+_CUDA = "CUDAExecutionProvider"
+_CPU = "CPUExecutionProvider"
+
+
+def _cpu_allowed() -> bool:
+    return os.environ.get(ALLOW_CPU_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def gpu_build_installed() -> bool:
+    """True when the ``onnxruntime-gpu`` distribution is installed. That is the
+    installer's stated intent to run on CUDA — the check the assertion keys on,
+    independent of what the ``onnxruntime`` package on disk actually is."""
+    import importlib.metadata
+
+    try:
+        importlib.metadata.distribution("onnxruntime-gpu")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _import_onnxruntime():
+    """Import onnxruntime, naming the extras when it is absent. It is no longer
+    a base dependency — the CPU and CUDA wheels conflict, so neither can be a
+    default without one install silently overturning the other."""
+    import importlib
+
+    try:
+        return importlib.import_module("onnxruntime")
+    except ModuleNotFoundError as exc:
+        if exc.name not in (None, "onnxruntime"):
+            raise
+        raise ModuleNotFoundError(
+            "onnxruntime is not installed. Pick a runtime: `pip install 'redactcam[cpu]'` "
+            "or, for CUDA, `pip install 'redactcam[gpu]'` (never both).",
+            name="onnxruntime",
+        ) from exc
+
+
+def _gpu_lost_message(available: list[str]) -> str:
+    return (
+        "onnxruntime-gpu is installed but CUDAExecutionProvider is not available "
+        f"(providers: {', '.join(available) or 'none'}). The CPU onnxruntime wheel was "
+        "most likely installed over the GPU build — both own the onnxruntime/ package "
+        "directory and the last install wins — or the CUDA runtime did not load. Repair: "
+        "`pip uninstall -y onnxruntime && pip install --force-reinstall --no-deps "
+        "onnxruntime-gpu==<pinned>`. Refusing to run on CPU silently; set "
+        f"{ALLOW_CPU_ENV}=1 to accept the CPU path."
+    )
+
+
 # Box is (x, y, w, h) in NATIVE frame pixels. One box shape everywhere, so the
 # timeline, mask and coverage verifier never have to convert.
 Box = tuple[int, int, int, int]
@@ -190,7 +253,7 @@ def _session_options(intra_threads: int):
     so boxes can shift sub-pixel run to run — irrelevant for a privacy mask,
     where the box still covers the object, but set 1 if you need byte-identical
     output across runs."""
-    import onnxruntime as ort
+    ort = _import_onnxruntime()
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = intra_threads
@@ -199,16 +262,51 @@ def _session_options(intra_threads: int):
     return opts
 
 
-def _providers(available: list[str]) -> list[str]:
+def _providers(available: list[str], *, gpu_expected: bool | None = None) -> list[str]:
     """Prefer CUDA when the ``onnxruntime-gpu`` build exposes it (the YOLO forward
     measured ~19× faster on GPU — 17-21 ms against ~400 ms per tile on a mid-range
-    consumer card), always keeping CPU as a fallback so a CPU-only host still
-    works. The stock CPU build never lists ``CUDAExecutionProvider``, so this is a
-    no-op until you install ``onnxruntime-gpu``. GPU float reductions are
-    non-deterministic — fine for a privacy mask, where boxes shift sub-pixel."""
-    if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
+    consumer card), keeping CPU as the fallback provider inside that session.
+    CPU-only is accepted only when the GPU build was never installed
+    (``gpu_expected`` False; default: is ``onnxruntime-gpu`` installed?). A host
+    that installed the GPU build and lost ``CUDAExecutionProvider`` raises
+    :class:`GpuProviderUnavailableError` — see that class for why a silent
+    fallback is worse than a crash. GPU float reductions are non-deterministic —
+    fine for a privacy mask, where boxes shift sub-pixel."""
+    if gpu_expected is None:
+        gpu_expected = gpu_build_installed()
+    if _CUDA in available:
+        return [_CUDA, _CPU]
+    if gpu_expected and not _cpu_allowed():
+        raise GpuProviderUnavailableError(_gpu_lost_message(list(available)))
+    return [_CPU]
+
+
+def _assert_session_on_gpu(sess_providers: list[str], *, gpu_expected: bool) -> None:
+    """``get_available_providers()`` listing CUDA is not the same as a session
+    USING it: the GPU wheel advertises CUDA even when libcudart is missing, and
+    ORT then constructs the session on CPU with a warning. The session's own
+    provider list is the ground truth, so check it right after construction."""
+    if not gpu_expected or _CUDA in sess_providers or _cpu_allowed():
+        return
+    raise GpuProviderUnavailableError(
+        "onnxruntime-gpu is installed and advertises CUDAExecutionProvider, but the "
+        f"session fell back to {', '.join(sess_providers)}: the CUDA runtime libraries did "
+        "not load (missing nvidia-* wheels or a CUDA-major mismatch, e.g. onnxruntime-gpu "
+        "1.27+ needs CUDA 13). Repair: reinstall the pinned onnxruntime-gpu with its nvidia-* "
+        f"wheels. Refusing to run on CPU silently; set {ALLOW_CPU_ENV}=1 to accept the CPU path."
+    )
+
+
+def check_inference_providers() -> list[str]:
+    """Preflight: the providers a detector built now would request, or raise
+    :class:`GpuProviderUnavailableError`. Call it at minute 0 of a pipeline so a
+    lost GPU fails before hours of scoring and concat, not after."""
+    ort = _import_onnxruntime()
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+    providers = _providers(list(ort.get_available_providers()))
+    logger.info("onnxruntime %s providers %s", getattr(ort, "__version__", "?"), providers)
+    return providers
 
 
 class YoloDetector:
@@ -236,17 +334,23 @@ class YoloDetector:
         max_aspect: float = 0.0,
         class_filter: frozenset[int] | None = None,
     ):
-        import onnxruntime as ort
+        ort = _import_onnxruntime()
 
         # The GPU build ships CUDA/cuDNN as pip wheels; preload them so ORT finds
         # the shared objects without a manual LD_LIBRARY_PATH (no-op on CPU build).
         if hasattr(ort, "preload_dlls"):
             ort.preload_dlls()
+        gpu_expected = gpu_build_installed()
         self._sess = ort.InferenceSession(
             str(model_path),
             sess_options=_session_options(intra_threads),
-            providers=_providers(ort.get_available_providers()),
+            providers=_providers(list(ort.get_available_providers()), gpu_expected=gpu_expected),
         )
+        # Verify the session actually landed where it was asked to (see
+        # ``_assert_session_on_gpu``); one log line per detector says which.
+        sess_providers = list(self._sess.get_providers())
+        _assert_session_on_gpu(sess_providers, gpu_expected=gpu_expected)
+        logger.info("%s on %s", Path(model_path).name, sess_providers[0])
         self._input_name = self._sess.get_inputs()[0].name
         self._infer_size = infer_size
         self._iou = iou

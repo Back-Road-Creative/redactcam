@@ -57,21 +57,47 @@ failure raises `CoverageError` instead of producing a file.
 ## Install
 
 ```bash
-pip install git+https://github.com/Back-Road-Creative/redactcam
+pip install "redactcam[cpu] @ git+https://github.com/Back-Road-Creative/redactcam"   # portable
+pip install "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam"   # CUDA
 ```
 
 Requires Python 3.11 or newer, and an **`ffmpeg`/`ffprobe` binary on your PATH**
 (the mask render and the blur composite shell out to it).
 
-Runtime dependencies are `opencv-python-headless`, `numpy` and `onnxruntime`.
-
-Optional extras:
+Runtime dependencies are `opencv-python-headless`, `numpy`, and **exactly one**
+onnxruntime build, chosen by extra. `onnxruntime` is deliberately not a base
+dependency: the CPU (`onnxruntime`) and CUDA (`onnxruntime-gpu`) wheels both own
+the `onnxruntime/` package directory and the last one installed wins, so a base
+dependency on either would let any later `pip install` silently replace the other.
+Without an extra, the first import raises a `ModuleNotFoundError` naming both.
 
 | Extra | What it adds |
 | --- | --- |
-| `redactcam[gpu]` | The CUDA onnxruntime build. Uninstall `onnxruntime` first — the two distributions conflict. Roughly 19× faster on the YOLO forward pass. |
+| `redactcam[cpu]` | The stock onnxruntime build. Runs anywhere. |
+| `redactcam[gpu]` | The CUDA onnxruntime build, roughly 19× faster on the YOLO forward pass. With it installed the detectors **require** `CUDAExecutionProvider` — see below. |
 | `redactcam[centerface]` | A CenterFace fallback used when no YOLO face model is configured. Noticeably weaker outdoors; a safety net, not a default. |
-| `redactcam[dev]` | pytest and ruff. |
+| `redactcam[dev]` | pytest, ruff and the CPU runtime so the suite can run. |
+
+**The GPU build refuses to run on CPU.** When the `onnxruntime-gpu` distribution
+is installed, `YoloDetector` requires `CUDAExecutionProvider` twice: in the
+providers the wheel advertises, and in the session it actually constructed (the
+GPU wheel advertises CUDA even when `libcudart` is missing, then quietly builds the
+session on CPU). Either miss raises `GpuProviderUnavailableError` with the repair
+in the message. The alternative — the silent ~19× slowdown ORT defaults to — is
+how a GPU pipeline venv once ran its blur pass on CPU for a day with nothing in
+the log saying why. Set `REDACTCAM_ALLOW_CPU=1` to accept the CPU path knowingly.
+
+Switching builds in an existing environment needs a force-reinstall, because after
+`pip uninstall onnxruntime` guts the shared package directory pip still sees
+`onnxruntime-gpu` as satisfied and rewrites nothing:
+
+```bash
+pip uninstall -y onnxruntime
+pip install --force-reinstall --no-deps "onnxruntime-gpu==<pinned version>"
+```
+
+A pipeline can run the same check at minute 0 with `check_inference_providers()`,
+which returns the providers a detector would use or raises.
 
 ### Model weights
 
@@ -197,12 +223,13 @@ encode), `--fresh` ignores the cached timeline sidecar and re-detects,
 `--blur-strength` sets the boxblur radius at 1920 px wide (scaled to the real
 width).
 
-`--check-deps` takes no input and answers one question: did the native
-extensions load? It imports OpenCV and onnxruntime and builds a real ONNX
-session options object, then prints their versions and the available execution
-providers. It is most useful after installing the Windows build, where those two
-are bundled by PyInstaller rather than by pip, and where a packaging miss would
-otherwise surface on your first real video:
+`--check-deps` takes no input and answers two questions: did the native
+extensions load, and which execution provider would a detector use? It imports
+OpenCV and onnxruntime, builds a real ONNX session options object, and prints
+their versions, the advertised providers and the `inference` decision. It is most
+useful after installing the Windows build, where those two are bundled by
+PyInstaller rather than by pip, and after any `pip install` into a GPU
+environment, where a CPU wheel may have replaced the CUDA build:
 
 ```console
 $ redactcam --check-deps
@@ -210,9 +237,11 @@ opencv          5.0.0
 onnxruntime     1.28.0
 providers       AzureExecutionProvider, CPUExecutionProvider
 session options intra=1 inter=1
+inference       CPUExecutionProvider
 ```
 
-It exits non-zero and names the module if one fails to load, and needs no model
+It exits non-zero and names the module if one fails to load, exits 1 with the
+repair when the GPU build is installed but CUDA is unavailable, and needs no model
 weights, so it will not trigger the first-run download.
 
 ### Python

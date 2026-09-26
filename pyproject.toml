@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redactcam"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tracked face, licence-plate, occupant and person redaction for video, with an independent coverage verifier."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,10 +23,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Recognition",
     "Topic :: Security",
 ]
+# onnxruntime is deliberately NOT a base dependency: the CPU (``onnxruntime``)
+# and CUDA (``onnxruntime-gpu``) wheels both own the ``onnxruntime/`` package
+# directory and the last one installed wins. A base dependency on either lets a
+# later ``pip install`` of this package silently replace the other — which is how
+# a GPU pipeline venv ended up running its blur pass on CPU for a day
+# (2026-09-25). Pick exactly one runtime extra: ``redactcam[cpu]`` or
+# ``redactcam[gpu]``.
 dependencies = [
     "opencv-python-headless>=4.8.0",
     "numpy>=1.24.0",
-    "onnxruntime>=1.16.0",
 ]
 
 [project.optional-dependencies]
@@ -34,10 +40,16 @@ dependencies = [
 # because it is a large dependency and a measurably weaker detector; the
 # library raises rather than silently detecting nothing when neither is present.
 centerface = ["deface>=1.5.0"]
-# Swap onnxruntime for the CUDA build. Install with --no-deps or uninstall
-# onnxruntime first; the two distributions conflict.
+# Exactly one of these. ``cpu`` is the portable build; ``gpu`` is the CUDA build
+# (the detectors then REQUIRE CUDAExecutionProvider and raise
+# GpuProviderUnavailableError if it is missing — REDACTCAM_ALLOW_CPU=1 overrides).
+# Switching from one to the other: ``pip uninstall -y onnxruntime`` then
+# ``pip install --force-reinstall --no-deps onnxruntime-gpu==<ver>`` — a plain
+# install sees the still-satisfied metadata and rewrites nothing.
+cpu = ["onnxruntime>=1.16.0"]
 gpu = ["onnxruntime-gpu>=1.16.0"]
 dev = [
+    "onnxruntime>=1.16.0",
     "pytest>=7.4",
     "ruff>=0.6",
 ]
