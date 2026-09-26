@@ -15,6 +15,7 @@ import pytest
 from redactcam import detect  # noqa: E402
 from redactcam.detect import (  # noqa: E402
     FrameRegions,
+    GpuProviderUnavailableError,
     ModelUnavailableError,
     YoloDetector,
     build_face_detector,
@@ -195,21 +196,189 @@ class TestSessionOptions:
 
 
 class TestProviders:
-    """CUDA is used when the GPU build exposes it; CPU stays the always-present
-    fallback, so a CPU-only host is unaffected until onnxruntime-gpu is added."""
+    """CUDA is used when the GPU build exposes it; CPU is the fallback ONLY on a
+    host that never installed the GPU build. A host that installed
+    ``onnxruntime-gpu`` and then lost ``CUDAExecutionProvider`` — the 2026-09-25
+    incident: a later ``pip install`` pulled the CPU ``onnxruntime`` wheel over
+    it, both wheels own ``onnxruntime/``, last install wins — must FAIL LOUDLY,
+    because a silent CPU fallback turned a 4 h blur pass into a multi-day one
+    with no line in the log saying why."""
 
     def test_cuda_preferred_when_available(self):
         avail = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
-        assert detect._providers(avail) == [
+        assert detect._providers(avail, gpu_expected=True) == [
             "CUDAExecutionProvider",
             "CPUExecutionProvider",
         ]
 
-    def test_cpu_only_when_no_cuda(self):
-        # The stock CPU build → CPU only.
+    def test_cpu_only_host_without_the_gpu_build_runs_on_cpu(self):
+        # The stock CPU build on a host that never asked for CUDA → CPU only.
         assert detect._providers(
-            ["AzureExecutionProvider", "CPUExecutionProvider"]
+            ["AzureExecutionProvider", "CPUExecutionProvider"], gpu_expected=False
         ) == ["CPUExecutionProvider"]
+
+    def test_gpu_build_without_cuda_is_a_hard_failure(self, monkeypatch):
+        monkeypatch.delenv(detect.ALLOW_CPU_ENV, raising=False)
+        with pytest.raises(GpuProviderUnavailableError) as exc:
+            detect._providers(["AzureExecutionProvider", "CPUExecutionProvider"], gpu_expected=True)
+        msg = str(exc.value)
+        # The message names the cause and the exact repair, so the operator
+        # who reads it at 02:00 does not have to rediscover the incident.
+        assert "onnxruntime-gpu" in msg
+        assert "CUDAExecutionProvider" in msg
+        assert "force-reinstall" in msg
+        assert detect.ALLOW_CPU_ENV in msg
+
+    def test_operator_can_accept_cpu_explicitly(self, monkeypatch):
+        monkeypatch.setenv(detect.ALLOW_CPU_ENV, "1")
+        assert detect._providers(["CPUExecutionProvider"], gpu_expected=True) == [
+            "CPUExecutionProvider"
+        ]
+
+    def test_allow_env_set_to_zero_does_not_allow(self, monkeypatch):
+        monkeypatch.setenv(detect.ALLOW_CPU_ENV, "0")
+        with pytest.raises(GpuProviderUnavailableError):
+            detect._providers(["CPUExecutionProvider"], gpu_expected=True)
+
+    def test_gpu_expected_defaults_to_the_installed_distribution(self, monkeypatch):
+        monkeypatch.delenv(detect.ALLOW_CPU_ENV, raising=False)
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: True)
+        with pytest.raises(GpuProviderUnavailableError):
+            detect._providers(["CPUExecutionProvider"])
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: False)
+        assert detect._providers(["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
+
+
+class TestGpuBuildInstalled:
+    def test_reads_the_onnxruntime_gpu_distribution(self, monkeypatch):
+        import importlib.metadata
+
+        seen = []
+
+        def _dist(name):
+            seen.append(name)
+            return object()
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _dist)
+        assert detect.gpu_build_installed() is True
+        assert seen == ["onnxruntime-gpu"]
+
+    def test_absent_distribution_is_false(self, monkeypatch):
+        import importlib.metadata
+
+        def _missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _missing)
+        assert detect.gpu_build_installed() is False
+
+
+class TestSessionOnGpu:
+    """``get_available_providers()`` listing CUDA is not the same as the session
+    USING it: the GPU wheel advertises CUDA even when libcudart is missing, and
+    ORT then falls back to CPU with a warning nobody reads. The session's own
+    provider list is the ground truth, checked right after construction."""
+
+    def test_session_on_cuda_passes(self):
+        detect._assert_session_on_gpu(
+            ["CUDAExecutionProvider", "CPUExecutionProvider"], gpu_expected=True
+        )
+
+    def test_session_fell_back_to_cpu_raises(self, monkeypatch):
+        monkeypatch.delenv(detect.ALLOW_CPU_ENV, raising=False)
+        with pytest.raises(GpuProviderUnavailableError) as exc:
+            detect._assert_session_on_gpu(["CPUExecutionProvider"], gpu_expected=True)
+        assert "fell back" in str(exc.value)
+
+    def test_cpu_session_is_fine_without_the_gpu_build(self):
+        detect._assert_session_on_gpu(["CPUExecutionProvider"], gpu_expected=False)
+
+    def test_operator_override_applies_here_too(self, monkeypatch):
+        monkeypatch.setenv(detect.ALLOW_CPU_ENV, "1")
+        detect._assert_session_on_gpu(["CPUExecutionProvider"], gpu_expected=True)
+
+    def test_yolo_detector_checks_the_real_session(self, monkeypatch, tmp_path):
+        """The constructor wires both gates: providers chosen from what is
+        available, then the constructed session verified."""
+        monkeypatch.delenv(detect.ALLOW_CPU_ENV, raising=False)
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: True)
+
+        class _Sess:
+            def __init__(self, path, sess_options=None, providers=None):
+                self.requested = providers
+
+            def get_providers(self):
+                return ["CPUExecutionProvider"]  # ORT silently fell back
+
+            def get_inputs(self):
+                return [SimpleNamespace(name="images")]
+
+        fake_ort = SimpleNamespace(
+            InferenceSession=_Sess,
+            get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            SessionOptions=lambda: SimpleNamespace(),
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0),
+        )
+        monkeypatch.setattr(detect, "_import_onnxruntime", lambda: fake_ort)
+        with pytest.raises(GpuProviderUnavailableError):
+            YoloDetector(tmp_path / "m.onnx", infer_size=640, iou=0.5, min_aspect=0.0)
+
+
+class TestCheckInferenceProviders:
+    """The public preflight hook a pipeline calls BEFORE it spends hours on
+    scoring and concat, so the failure lands at minute 0 rather than minute 15."""
+
+    def test_returns_the_providers_a_detector_would_use(self, monkeypatch):
+        fake_ort = SimpleNamespace(
+            get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            __version__="1.22.0",
+        )
+        monkeypatch.setattr(detect, "_import_onnxruntime", lambda: fake_ort)
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: True)
+        assert detect.check_inference_providers() == [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+
+    def test_raises_when_the_gpu_build_lost_cuda(self, monkeypatch):
+        monkeypatch.delenv(detect.ALLOW_CPU_ENV, raising=False)
+        fake_ort = SimpleNamespace(
+            get_available_providers=lambda: ["AzureExecutionProvider", "CPUExecutionProvider"],
+            __version__="1.30.0",
+        )
+        monkeypatch.setattr(detect, "_import_onnxruntime", lambda: fake_ort)
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: True)
+        with pytest.raises(GpuProviderUnavailableError):
+            detect.check_inference_providers()
+
+    def test_preloads_cuda_dlls_when_the_build_offers_it(self, monkeypatch):
+        called = []
+        fake_ort = SimpleNamespace(
+            get_available_providers=lambda: ["CPUExecutionProvider"],
+            preload_dlls=lambda: called.append(True),
+            __version__="1.22.0",
+        )
+        monkeypatch.setattr(detect, "_import_onnxruntime", lambda: fake_ort)
+        monkeypatch.setattr(detect, "gpu_build_installed", lambda: False)
+        detect.check_inference_providers()
+        assert called == [True]
+
+
+class TestOnnxruntimeImport:
+    def test_missing_onnxruntime_names_the_extras(self, monkeypatch):
+        """onnxruntime moved out of the base dependencies (the CPU and CUDA
+        wheels conflict, so neither can be a default), so a bare install must
+        say which extra to add instead of a bare ModuleNotFoundError."""
+        import importlib
+
+        def _missing(name):
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
+
+        monkeypatch.setattr(importlib, "import_module", _missing)
+        with pytest.raises(ModuleNotFoundError) as exc:
+            detect._import_onnxruntime()
+        assert "redactcam[cpu]" in str(exc.value)
+        assert "redactcam[gpu]" in str(exc.value)
 
 
 class TestPlateDecoder:

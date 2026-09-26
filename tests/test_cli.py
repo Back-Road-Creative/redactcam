@@ -88,6 +88,14 @@ class TestCheckDeps:
     it inside a function -- so the release smoke test passed against an
     executable that might not have been able to detect anything."""
 
+    @pytest.fixture(autouse=True)
+    def _host_independent(self, monkeypatch):
+        """These exercise the real import path, so they must not depend on which
+        onnxruntime wheel the HOST venv has: a GPU build that lost CUDA makes
+        --check-deps exit 1 by design (tested below with a stub). Accept the
+        CPU path here; the assertion itself is unit-tested in test_detect."""
+        monkeypatch.setenv("REDACTCAM_ALLOW_CPU", "1")
+
     def test_reports_both_extensions_and_exits_zero(self, capsys):
         assert cli.main(["--check-deps"]) == 0
         out = capsys.readouterr().out
@@ -107,6 +115,29 @@ class TestCheckDeps:
     def test_input_is_still_required_without_it(self):
         with pytest.raises(SystemExit):
             cli.main([])
+
+    def test_reports_the_inference_provider_decision(self, monkeypatch, capsys):
+        """The 2026-09-25 incident was invisible to ``--check-deps`` as it stood:
+        it printed the provider list and exited 0 whether or not a detector
+        would actually use CUDA. It now prints the decision the detectors make."""
+        monkeypatch.setattr(
+            cli,
+            "_check_inference_providers_for_check",
+            lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        assert cli.main(["--check-deps"]) == 0
+        out = capsys.readouterr().out
+        assert "inference       CUDAExecutionProvider" in out
+
+    def test_a_gpu_build_that_lost_cuda_is_a_nonzero_exit(self, monkeypatch, capsys):
+        from redactcam.detect import GpuProviderUnavailableError
+
+        def _lost():
+            raise GpuProviderUnavailableError("onnxruntime-gpu installed, CUDA missing")
+
+        monkeypatch.setattr(cli, "_check_inference_providers_for_check", _lost)
+        assert cli.main(["--check-deps"]) == 1
+        assert "CUDA missing" in capsys.readouterr().err
 
     def test_a_missing_extension_is_a_nonzero_exit(self, monkeypatch, capsys):
         def _boom(_):

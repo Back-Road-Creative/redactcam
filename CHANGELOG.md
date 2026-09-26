@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **`onnxruntime` is no longer a base dependency — install `redactcam[cpu]` or
+  `redactcam[gpu]`.** The CPU and CUDA wheels both own the `onnxruntime/` package
+  directory and the last one installed wins, so a base dependency on the CPU wheel
+  let any later `pip install` of this package (or of a project depending on it)
+  silently replace `onnxruntime-gpu`. That is what happened to a GPU pipeline venv on
+  2026-09-25: the blur pass ran on CPU for a day with no line in the log saying why.
+  `dev` now carries the CPU runtime so CI still runs; the frozen Windows build
+  installs `.[cpu]`. A bare import without either extra raises a
+  `ModuleNotFoundError` that names both extras.
+- **A GPU build that cannot use CUDA now fails instead of falling back to CPU.**
+  When the `onnxruntime-gpu` distribution is installed, `YoloDetector` requires
+  `CUDAExecutionProvider` both in the advertised providers and in the constructed
+  session (the GPU wheel advertises CUDA even when `libcudart` is missing, then
+  builds the session on CPU with a warning). Either miss raises
+  `GpuProviderUnavailableError`, whose message names the cause and the exact
+  `--force-reinstall --no-deps` repair. `REDACTCAM_ALLOW_CPU=1` accepts the CPU path
+  knowingly. New `check_inference_providers()` runs the same check as a preflight so a
+  pipeline can fail at minute 0; `redactcam --check-deps` calls it and prints an
+  `inference` line with the provider a detector would use, exiting 1 on the miss.
+- `__version__` is 0.2.0 and now checked against `pyproject.toml` (they had drifted).
+
 ### Fixed
 
 - Two objects visible at once no longer collapse onto one track, leaving one of

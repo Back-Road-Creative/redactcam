@@ -74,6 +74,13 @@ def _session_options_for_check(intra_threads: int):
     return _session_options(intra_threads)
 
 
+def _check_inference_providers_for_check() -> list[str]:
+    """Indirection for the same reason as ``_session_options_for_check``."""
+    from .detect import check_inference_providers
+
+    return check_inference_providers()
+
+
 def _check_deps() -> int:
     """Load the native extensions, use them, and say what loaded.
 
@@ -89,11 +96,13 @@ def _check_deps() -> int:
     file on purpose: the weights are a ~110 MB download and a release runner has
     neither.
     """
+    from .detect import GpuProviderUnavailableError, _import_onnxruntime
+
     try:
         import cv2
 
         opts = _session_options_for_check(1)
-        import onnxruntime as ort
+        ort = _import_onnxruntime()
     except ImportError as exc:
         print(f"redactcam: a native dependency did not load: {exc}", file=sys.stderr)
         return 1
@@ -102,6 +111,15 @@ def _check_deps() -> int:
     print(f"onnxruntime     {ort.__version__}")
     print(f"providers       {', '.join(ort.get_available_providers())}")
     print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
+    # The provider LIST above is what the wheel advertises; this line is the
+    # decision a detector makes from it — and it is where a GPU build that lost
+    # CUDA fails, instead of exiting 0 and running on CPU for a day.
+    try:
+        inference = _check_inference_providers_for_check()
+    except GpuProviderUnavailableError as exc:
+        print(f"redactcam: {exc}", file=sys.stderr)
+        return 1
+    print(f"inference       {inference[0]}")
     return 0
 
 
