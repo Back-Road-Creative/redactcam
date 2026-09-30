@@ -45,3 +45,13 @@ class TestOnnxruntimeIsAnExtra:
 def test_version_is_declared_once():
     """``__version__`` and pyproject drifted (0.1.0 vs 0.1.1) with nothing to catch it."""
     assert redactcam.__version__ == _project()["version"]
+
+
+def test_release_smoke_test_skips_the_ffmpeg_check():
+    """``--check-deps`` requires ffmpeg. The Windows release runner deliberately has
+    none (it is not bundled), so the frozen-exe smoke test must opt out or every
+    release fails after the installer is already built."""
+    workflow = (_PYPROJECT.parent / ".github" / "workflows" / "release.yml").read_text()
+    lines = [ln.strip() for ln in workflow.splitlines() if "redactcam.exe --check-deps" in ln]
+    assert lines, "the release smoke test no longer runs --check-deps"
+    assert all("--skip-ffmpeg" in ln for ln in lines)

@@ -26,6 +26,20 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+FFMPEG_TOOLS = ("ffmpeg", "ffprobe")
+FFMPEG_INSTALL_HINT = (
+    "Install FFmpeg and make sure both ffmpeg and ffprobe are on PATH "
+    "(Windows: `winget install -e --id Gyan.FFmpeg`; macOS: `brew install ffmpeg`; "
+    "Debian/Ubuntu: `apt install ffmpeg` as root), then open a new terminal."
+)
+
+
+class FfmpegUnavailableError(RuntimeError):
+    """``ffmpeg`` or ``ffprobe`` is missing or does not run. Raised before any
+    detection starts: the mask render is the first ffmpeg call, so without this
+    a missing binary would surface only after the whole detection pass, hours
+    into a long video, as a bare ``FileNotFoundError``."""
+
 
 def tool_status(name: str) -> dict:
     """Where ``name`` resolves on PATH and the first line of ``-version``.
@@ -49,6 +63,15 @@ def tool_status(name: str) -> dict:
         }
     return {"name": name, "path": path, "version": lines[0][:200], "error": None}
 
+
+def require_ffmpeg() -> dict[str, dict]:
+    """Confirm ``ffmpeg`` and ``ffprobe`` both run; raise ``FfmpegUnavailableError``
+    with the install instructions if not. Returns each tool's ``tool_status``."""
+    status = {name: tool_status(name) for name in FFMPEG_TOOLS}
+    problems = [s["error"] for s in status.values() if s["error"]]
+    if problems:
+        raise FfmpegUnavailableError("; ".join(problems) + ". " + FFMPEG_INSTALL_HINT)
+    return status
 
 # boxblur luma radius at 1920 px wide. Scaled by actual width in blur_radius().
 # 12 at 1080p reduces a face to an unrecognisable smear while leaving the scene

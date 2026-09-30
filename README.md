@@ -240,9 +240,39 @@ session options intra=1 inter=1
 inference       CPUExecutionProvider
 ```
 
+It also runs `ffmpeg -version` and `ffprobe -version`, and exits 1 with the
+per-platform install line when either is missing or will not run (`redactcam` also
+checks this at the top of every render, before detection starts, rather than
+hours later at the mask stage). `--skip-ffmpeg` drops that check for a build smoke
+test on a runner with no ffmpeg; it is not valid with `--receipt`.
+
 It exits non-zero and names the module if one fails to load, exits 1 with the
 repair when the GPU build is installed but CUDA is unavailable, and needs no model
-weights, so it will not trigger the first-run download.
+weights, so it will not trigger the first-run download. Add `--model KIND=PATH`
+and it also hashes each supplied file, builds its detector and runs it on one
+blank frame, so a file that is not a YOLO ONNX model fails here with the file and
+the flag named, not on the first real clip.
+
+### Qualify a clean machine
+
+A successful download proves nothing about whether the machine can redact. On a
+disposable install of the OS you intend to support, with the model files you have
+qualified (nothing is downloaded, and the run refuses to start without all four):
+
+```bash
+redactcam --check-deps --receipt clean-machine.json \
+  --model face=/models/face.onnx --model plate=/models/plate.onnx \
+  --model vehicle=/models/coco.onnx --model person=/models/coco.onnx
+```
+
+It runs every check above, then one synthetic 2 s clip (ffmpeg `testsrc`, no real
+footage) through the whole pipeline to an encoded H.264 file, and writes a
+versioned receipt (`redactcam.clean-machine-receipt/v1`): launch details, the
+installed identity, the diagnostics, each detector's status and file hash, and the
+render's output hash. `"qualified": true` only when the diagnostics, all four
+detectors and the render passed; every gap writes a receipt with `false` and
+exits 1. Which OS and which model files count as qualified is your decision: the
+receipt records what ran, it does not judge it.
 
 ### Which build is installed
 
@@ -410,7 +440,7 @@ Everything below is importable straight from `redactcam`.
 `file_hash()`.
 
 **Provenance** — `runtime_identity()`, `model_identity()`, `check_current()`,
-`StaleInstallError`.
+`StaleInstallError`, `require_ffmpeg()`, `FfmpegUnavailableError`.
 
 **Detection** — `detect_and_track()` (the dense per-frame workhorse),
 `detect_regions()` (sparse, no tracking), `detect_image()` (one still),
