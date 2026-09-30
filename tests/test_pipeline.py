@@ -131,3 +131,30 @@ def test_file_hash_is_content_addressed(tmp_path):
     assert pl.file_hash(a) == pl.file_hash(b)
     b.write_bytes(b"different")
     assert pl.file_hash(a) != pl.file_hash(b)
+
+
+def test_required_unchecked_class_refuses_to_render(wired, source, tmp_path):
+    """The stub verifier finds vehicles, so cabin is verified; face never is. A
+    caller that requires face must be refused BEFORE the encode, not told OK."""
+    from redactcam.coverage import RequiredClassError
+
+    with pytest.raises(RequiredClassError) as exc:
+        pl.redact_video(source, work_dir=tmp_path / "work", require_verified=("cabin", "face"))
+    assert "render" not in wired
+    assert set(exc.value.classes) == {"face"}
+
+
+def test_required_cabin_passes_when_verified(wired, source, tmp_path):
+    result = pl.redact_video(source, work_dir=tmp_path / "work", require_verified=("cabin",))
+    assert result.output is not None
+
+
+def test_requiring_a_class_with_verification_skipped_refuses(wired, source, tmp_path):
+    """--no-verify must not be a way round a required class: skipped is unchecked."""
+    from redactcam.coverage import RequiredClassError
+
+    with pytest.raises(RequiredClassError):
+        pl.redact_video(
+            source, work_dir=tmp_path / "work", verify=False, require_verified=("cabin",)
+        )
+    assert "render" not in wired

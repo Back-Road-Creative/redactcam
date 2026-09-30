@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Per-class verification result.** `CoverageReport.classes` reports `cabin`, `face`,
+  `plate` and `person` each as `verified`, `failed` or `unchecked` with the evidence
+  basis and its limitation; only `cabin` can be verified today, so a cabin-only pass
+  is never an all-classes pass and zero sightings is `unchecked`, not clean.
+  `require_verified` (`redact_video`, `--require-verified`, `report.require_verified`)
+  refuses failed or unchecked required classes with `RequiredClassError` before any
+  render, including under `--no-verify`. `report.to_dict()` is the JSON contract. The
+  CLI summary prints one line per class instead of "coverage OK". `ok` is unchanged
+  (no leak found).
+- `redactcam.heldout`: predeclared held-out evaluation (manifest digest, per-class
+  misses, standing limitations) where unlabelled classes stay `unchecked`.
+
 ### Changed
 
 - **`onnxruntime` is no longer a base dependency — install `redactcam[cpu]` or
