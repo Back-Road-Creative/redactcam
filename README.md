@@ -244,6 +244,36 @@ It exits non-zero and names the module if one fails to load, exits 1 with the
 repair when the GPU build is installed but CUDA is unavailable, and needs no model
 weights, so it will not trigger the first-run download.
 
+### Which build is installed
+
+A version string did not change across the tracking fix, so it cannot say whether
+an install is current. `redactcam --identity` prints the installed identity as
+JSON: the version, `code_sha256` (a digest of the package's own sources), the git
+commit it was installed from when that is recorded, and the native stack including
+which onnxruntime *distribution* is present. To refuse a stale install, compare
+against what you expect:
+
+```bash
+redactcam --expect-revision c34854e        # commit prefix, at least 7 characters
+redactcam --expect-code-sha256 <hex> --expect-version 0.2.0
+```
+
+Any mismatch, or a value that cannot be determined (a wheel or frozen build
+records no commit), exits 1: an unknown is never a match. From Python,
+`redactcam.check_current(expected_revision=…)` raises `StaleInstallError`.
+
+### Render receipts
+
+Every completed `redact_video()` run writes `<stem>_redactcam_receipt.json` beside
+the mask (`result.receipt`). It records the installed identity above, the SHA256
+of the source, of the output, and of every model file the run resolved (a model
+that did not resolve is `null`, a file that could not be read has a `null` hash),
+the coverage outcome, and the settings. `"detection": "reused_sidecar"` marks a run
+that loaded a cached timeline: the sidecar records the source hash but not what
+produced it, so for those runs the receipt identifies the code that built the mask
+and render, not necessarily the code that detected. Use `--fresh` when the
+detection identity matters.
+
 ### Python
 
 ```python
@@ -378,6 +408,9 @@ Everything below is importable straight from `redactcam`.
 
 **Pipeline** — `redact_video()`, `RedactionResult`, `CoverageError`,
 `file_hash()`.
+
+**Provenance** — `runtime_identity()`, `model_identity()`, `check_current()`,
+`StaleInstallError`.
 
 **Detection** — `detect_and_track()` (the dense per-frame workhorse),
 `detect_regions()` (sparse, no tracking), `detect_image()` (one still),

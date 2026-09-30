@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 
+from . import provenance
 from .models import DEFAULT_MODELS, ModelSpec
 from .pipeline import CoverageError, redact_video
 
@@ -62,6 +64,22 @@ def _parser() -> argparse.ArgumentParser:
         "--check-deps",
         action="store_true",
         help="load the native extensions, report their versions, and exit; takes no input",
+    )
+    p.add_argument(
+        "--identity",
+        action="store_true",
+        help="print the installed code/native-runtime identity as JSON and exit",
+    )
+    p.add_argument("--expect-version", metavar="X.Y.Z", help="exit 1 unless the installed version matches")
+    p.add_argument(
+        "--expect-code-sha256",
+        metavar="HEX",
+        help="exit 1 unless the installed sources hash to this (see --identity)",
+    )
+    p.add_argument(
+        "--expect-revision",
+        metavar="COMMIT",
+        help="exit 1 unless the installed git commit starts with this (>= 7 chars)",
     )
     return p
 
@@ -135,6 +153,33 @@ def _models(pairs: list[str]) -> dict[str, ModelSpec]:
     return out
 
 
+def _check_expectations(args: argparse.Namespace) -> int:
+    """Exit 1 when the installed package is not the build the caller expected."""
+    try:
+        provenance.check_current(
+            expected_version=args.expect_version,
+            expected_code_sha256=args.expect_code_sha256,
+            expected_revision=args.expect_revision,
+        )
+    except (provenance.StaleInstallError, ValueError) as exc:
+        print(f"redactcam: {exc}", file=sys.stderr)
+        return 1
+    print("identity        matches the expected build")
+    return 0
+
+
+def _models(pairs: list[str]) -> dict[str, ModelSpec]:
+    out: dict[str, ModelSpec] = {}
+    for pair in pairs:
+        kind, _, path = pair.partition("=")
+        if not path:
+            raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
+        if kind not in DEFAULT_MODELS:
+            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
+        out[kind] = ModelSpec(name=kind, path=path)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -142,8 +187,16 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    if args.check_deps:
-        return _check_deps()
+    expecting = args.expect_version or args.expect_code_sha256 or args.expect_revision
+    if args.check_deps or expecting or args.identity:
+        rc = 0
+        if args.check_deps:
+            rc = _check_deps()
+        if expecting:
+            rc = max(rc, _check_expectations(args))
+        if args.identity:
+            print(json.dumps(provenance.runtime_identity(), indent=2, sort_keys=True))
+        return rc
     if args.input is None:
         parser.error("input is required")
     try:

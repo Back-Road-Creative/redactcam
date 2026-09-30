@@ -146,3 +146,38 @@ class TestCheckDeps:
         monkeypatch.setattr(cli, "_session_options_for_check", _boom)
         assert cli.main(["--check-deps"]) == 1
         assert "no onnxruntime here" in capsys.readouterr().err
+
+
+class TestIdentityFlags:
+    @pytest.fixture(autouse=True)
+    def _fixed(self, monkeypatch):
+        from redactcam import provenance
+
+        monkeypatch.setattr(
+            provenance,
+            "runtime_identity",
+            lambda: {
+                "redactcam": {
+                    "version": "0.2.0",
+                    "code_sha256": "ab" * 32,
+                    "revision": {"commit": "c34854e" + "0" * 33, "source": "git"},
+                }
+            },
+        )
+
+    def test_identity_prints_json_and_needs_no_input(self, capsys):
+        import json
+
+        assert cli.main(["--identity"]) == 0
+        assert json.loads(capsys.readouterr().out)["redactcam"]["version"] == "0.2.0"
+
+    def test_a_matching_expectation_exits_zero(self):
+        assert cli.main(["--expect-revision", "c34854e"]) == 0
+
+    def test_a_stale_install_is_a_nonzero_exit_that_says_so(self, capsys):
+        assert cli.main(["--expect-revision", "6d731a5fb"]) == 1
+        assert "not the expected build" in capsys.readouterr().err
+
+    def test_a_too_short_revision_is_refused(self, capsys):
+        assert cli.main(["--expect-revision", "c34"]) == 1
+        assert "at least 7" in capsys.readouterr().err

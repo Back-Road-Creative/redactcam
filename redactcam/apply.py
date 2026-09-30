@@ -20,10 +20,35 @@ as a 1080p one.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def tool_status(name: str) -> dict:
+    """Where ``name`` resolves on PATH and the first line of ``-version``.
+
+    Never raises. ``error`` is ``None`` when the tool ran, else a sentence saying
+    what is wrong."""
+    path = shutil.which(name)
+    if path is None:
+        return {"name": name, "path": None, "version": None, "error": f"{name} was not found on PATH"}
+    try:
+        proc = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"name": name, "path": path, "version": None, "error": f"{name} did not run: {exc}"}
+    lines = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        return {
+            "name": name,
+            "path": path,
+            "version": None,
+            "error": f"{name} -version exited {proc.returncode}",
+        }
+    return {"name": name, "path": path, "version": lines[0][:200], "error": None}
+
 
 # boxblur luma radius at 1920 px wide. Scaled by actual width in blur_radius().
 # 12 at 1080p reduces a face to an unrecognisable smear while leaving the scene

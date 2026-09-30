@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Render receipts.** `redact_video()` writes `<stem>_redactcam_receipt.json`
+  (`result.receipt`) naming the exact code (`code_sha256`, installed git commit),
+  the SHA256 of every model file resolved, the source and output hashes, the
+  native runtime (OpenCV, numpy, which onnxruntime distribution, ffmpeg build) and
+  the coverage outcome. A run that reused a cached timeline says so.
+- **Stale-install detection.** `redactcam --identity`, `--expect-revision`,
+  `--expect-code-sha256`, `--expect-version` and `redactcam.check_current()`;
+  an install whose identity cannot be determined never passes.
+
 ### Changed
 
 - **`onnxruntime` is no longer a base dependency — install `redactcam[cpu]` or

@@ -131,3 +131,85 @@ def test_file_hash_is_content_addressed(tmp_path):
     assert pl.file_hash(a) == pl.file_hash(b)
     b.write_bytes(b"different")
     assert pl.file_hash(a) != pl.file_hash(b)
+
+
+class TestRenderReceipt:
+    """A render must say exactly what produced it: the code, the model files, the
+    native runtime -- not a version string that did not change across the
+    tracking fix."""
+
+    @pytest.fixture
+    def real_models(self, monkeypatch, tmp_path):
+        files = {}
+
+        def _resolve(spec, cache=None):
+            p = tmp_path / f"{spec.name}.onnx"
+            p.write_bytes(f"weights-of-{spec.name}".encode())
+            files[spec.name] = p
+            return p
+
+        monkeypatch.setattr(pl, "resolve_model", _resolve)
+        return files
+
+    def _receipt(self, result):
+        import json
+
+        return json.loads(result.receipt.read_text())
+
+    def test_a_receipt_is_written_beside_the_outputs(self, wired, real_models, source, tmp_path):
+        result = pl.redact_video(source, work_dir=tmp_path / "work")
+        assert result.receipt == tmp_path / "work" / "clip_redactcam_receipt.json"
+        r = self._receipt(result)
+        assert r["schema"] == "redactcam.render-receipt/v1"
+
+    def test_it_carries_code_and_model_hashes(self, wired, real_models, source, tmp_path):
+        from redactcam.provenance import code_sha256, sha256_file
+
+        r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work"))
+        assert r["identity"]["redactcam"]["code_sha256"] == code_sha256()[0]
+        for kind, path in real_models.items():
+            assert r["models"][kind]["sha256"] == sha256_file(path)
+        assert r["identity"]["native"]["opencv"]
+
+    def test_it_carries_source_and_output_hashes(self, wired, real_models, source, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            pl._apply,
+            "apply_blur",
+            lambda src, mask, out, **kw: (out.write_bytes(b"rendered"), out)[1],
+        )
+        result = pl.redact_video(source, work_dir=tmp_path / "work")
+        r = self._receipt(result)
+        assert r["source_sha256"] == pl.file_hash(source)
+        assert r["output_sha256"] == pl.file_hash(result.output)
+
+    def test_no_render_has_no_output_hash(self, wired, real_models, source, tmp_path):
+        r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work", render=False))
+        assert r["output_sha256"] is None
+        assert r["settings"]["render"] is False
+
+    def test_a_reused_timeline_is_labelled_as_not_produced_by_this_run(
+        self, wired, real_models, source, tmp_path
+    ):
+        """The sidecar does not record what produced it, so a reused timeline's
+        code and models are unknown -- the receipt must not imply otherwise."""
+        work = tmp_path / "work"
+        first = self._receipt(pl.redact_video(source, work_dir=work, render=False))
+        again = self._receipt(pl.redact_video(source, work_dir=work, render=False))
+        assert first["detection"] == "fresh"
+        assert again["detection"] == "reused_sidecar"
+
+    def test_it_records_coverage_and_settings(self, wired, real_models, source, tmp_path):
+        r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work", blur_strength=20))
+        assert r["coverage"] == {"checked": True, "ok": True, "vehicle_frames": 3, "leaks": 0}
+        assert r["settings"]["blur_strength"] == 20
+        assert "face_model_path" not in r["settings"]["detect"]  # paths live under models
+
+    def test_skipped_verification_is_recorded_as_unchecked(self, wired, real_models, source, tmp_path):
+        r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work", verify=False))
+        assert r["coverage"]["checked"] is False and r["coverage"]["ok"] is None
+
+    def test_an_unresolved_model_is_recorded_as_missing(self, wired, source, tmp_path, monkeypatch):
+        monkeypatch.setattr(pl, "resolve_model", lambda spec, cache=None: None)
+        r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work", verify=False))
+        assert r["models"]["plate"] is None
+
