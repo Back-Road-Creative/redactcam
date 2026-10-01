@@ -211,11 +211,23 @@ redactcam dashcam.mp4 -o dashcam_redacted.mp4 -v
 ```
 timeline  dashcam_redactcam.json
 mask      dashcam_redactcam_mask.mkv (5412 frames)
-coverage  OK across 63 vehicle sightings
+coverage  cabin   verified  63 vehicle sightings
+          face    UNCHECKED no independent verifier for this class ...
+          plate   UNCHECKED plates are used only to corroborate vehicles ...
+          person  UNCHECKED no independent verifier for this class ...
 output    dashcam_redacted.mp4
 ```
 
-Exit code `2` means the coverage check failed and **nothing was rendered**.
+Each privacy class is `verified`, `FAILED` or `UNCHECKED`. **`UNCHECKED` means
+unknown, not safe**: only the vehicle cabin has an independent check today, so a
+clean run never says the faces, plates or pedestrians were covered. A run with
+zero vehicle sightings reports the cabin as `UNCHECKED` too, and `--no-verify`
+prints `coverage  NOT RUN`.
+
+Exit code `2` means the coverage check failed (or a `--require-verified` class was
+not verified) and **nothing was rendered**. `--require-verified CLASS` (repeatable;
+`cabin`, `face`, `plate`, `person`) refuses unless that class is `verified`; since
+only `cabin` can be today, requiring another class always refuses.
 
 Useful flags: `--no-render` stops after the mask and the check (bring your own
 encode), `--fresh` ignores the cached timeline sidecar and re-detects,
@@ -290,7 +302,15 @@ print(result.output)                       # the blurred video
 print(result.mask)                         # the gray mask clip
 print(result.sidecar)                      # the JSON blur timeline
 print(result.coverage.vehicle_frames)      # sightings the verifier checked
+print(result.coverage.classes["face"].status)  # Status.UNCHECKED -- unknown, not safe
 ```
+
+`result.coverage.ok` only means "no leak found" (a run that checked nothing is
+`ok`). To gate on what was actually verified, pass `require_verified=("cabin",)`
+to `redact_video`, or call `report.require_verified("cabin", "face")` yourself;
+both raise `RequiredClassError` for a class that is failed *or unchecked*.
+`report.to_dict()` is the JSON contract for consumers (`schema: 1`, per-class
+`status`, `basis`, `limitation`, `checked`, `misses`).
 
 Detection is nearly all the run time, so the timeline is cached in a JSON sidecar
 keyed by the SHA256 of the source file. Re-running against the same input reuses
@@ -374,8 +394,18 @@ Read this part before you rely on it.
   vehicles, corroborates them with a plate, and confirms the mask covers each
   cabin. It does *not* verify that every pedestrian face was found — an
   independent verifier can only check what an independent detector can find, and
-  a face the detector misses twice is missed by both passes. Coverage OK means "no
-  uncovered driver", not "nothing was missed".
+  a face the detector misses twice is missed by both passes. The report says so
+  per class: `cabin` may be `verified`, while `face`, `plate` and `person` are
+  `UNCHECKED`. "No uncovered driver" is not "nothing was missed", and no
+  synthetic test or threshold change can establish that every person or plate is
+  found.
+- **Recall is measured on a predeclared held-out set, per class.**
+  `redactcam.heldout` scores human-labelled boxes against predictions. The
+  `HeldOutManifest` (labelled cases plus the human review criteria) has a digest
+  you record *before* tuning a model or threshold; `evaluate()` refuses to score
+  a manifest that no longer matches it. Results list each missed item per class,
+  a class with no labels is `UNCHECKED`, and even zero misses is reported as a
+  sample, not a guarantee.
 - **`min_coverage` defaults to 0.5, not 1.0.** The verifier detects the vehicle
   independently of whatever produced the blur, so a box landing a few percent off
   trims edge pixels while the driver, who sits near the cabin centre, stays

@@ -13,7 +13,17 @@ Five stages, each usable on its own:
 """
 
 from .apply import apply_blur, blur_filter_complex, blur_radius
-from .coverage import CoverageReport, Leak, cabin_region, plate_inside, verify_cabin_coverage
+from .coverage import (
+    CLASSES,
+    ClassCoverage,
+    CoverageReport,
+    Leak,
+    RequiredClassError,
+    Status,
+    cabin_region,
+    plate_inside,
+    verify_cabin_coverage,
+)
 from .detect import (
     ALLOW_CPU_ENV,
     Box,
@@ -119,6 +129,10 @@ __all__ = [
     "apply_blur",
     # coverage
     "CoverageReport",
+    "ClassCoverage",
+    "RequiredClassError",
+    "Status",
+    "CLASSES",
     "Leak",
     "cabin_region",
     "plate_inside",

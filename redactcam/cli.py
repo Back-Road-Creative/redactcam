@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import provenance
+from .coverage import CLASSES, RequiredClassError
 from .models import DEFAULT_MODELS, ModelSpec
 from .pipeline import CoverageError, redact_video
 
@@ -42,6 +43,18 @@ def _parser() -> argparse.ArgumentParser:
         "--no-verify",
         action="store_true",
         help="skip the independent coverage check (not recommended)",
+    )
+    p.add_argument(
+        "--require-verified",
+        action="append",
+        default=[],
+        choices=CLASSES,
+        metavar="CLASS",
+        help=(
+            "refuse (exit 2, nothing rendered) unless this privacy class is VERIFIED, not "
+            f"merely un-failed; one of {', '.join(CLASSES)}. Repeatable. Only cabin can be "
+            "verified today, so requiring another class always refuses"
+        ),
     )
     p.add_argument(
         "--no-render",
@@ -168,16 +181,17 @@ def _check_expectations(args: argparse.Namespace) -> int:
     return 0
 
 
-def _models(pairs: list[str]) -> dict[str, ModelSpec]:
-    out: dict[str, ModelSpec] = {}
-    for pair in pairs:
-        kind, _, path = pair.partition("=")
-        if not path:
-            raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
-        if kind not in DEFAULT_MODELS:
-            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
-        out[kind] = ModelSpec(name=kind, path=path)
-    return out
+def _print_coverage(report) -> None:
+    """One line per privacy class. UNCHECKED is printed as loudly as a failure:
+    it means unknown, and "coverage OK" must never stand in for it."""
+    if report is None:
+        print("coverage  NOT RUN (verification skipped): every class is UNCHECKED")
+        return
+    for i, (name, c) in enumerate(report.classes.items()):
+        head = "coverage " if i == 0 else "         "
+        state = c.status.value.upper() if c.status.value != "verified" else "verified"
+        detail = f"{c.checked} vehicle sightings" if name == "cabin" and c.checked else c.basis
+        print(f"{head} {name:<7} {state:<9} {detail}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -206,11 +220,15 @@ def main(argv: list[str] | None = None) -> int:
             work_dir=args.work_dir,
             models=_models(args.model),
             verify=not args.no_verify,
+            require_verified=tuple(args.require_verified),
             render=not args.no_render,
             reuse_sidecar=not args.fresh,
             blur_strength=args.blur_strength,
         )
     except CoverageError as exc:
+        print(f"coverage check FAILED: {exc}", file=sys.stderr)
+        return 2
+    except RequiredClassError as exc:
         print(f"coverage check FAILED: {exc}", file=sys.stderr)
         return 2
     except (OSError, ValueError, RuntimeError) as exc:
@@ -219,8 +237,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"timeline  {result.sidecar}")
     print(f"mask      {result.mask} ({result.frame_count} frames)")
-    if result.coverage is not None:
-        print(f"coverage  OK across {result.coverage.vehicle_frames} vehicle sightings")
+    _print_coverage(result.coverage)
     if result.output is not None:
         print(f"output    {result.output}")
     return 0

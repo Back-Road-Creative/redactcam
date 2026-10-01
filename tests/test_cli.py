@@ -148,6 +148,56 @@ class TestCheckDeps:
         assert "no onnxruntime here" in capsys.readouterr().err
 
 
+def test_summary_states_each_class_and_never_says_ok_for_unchecked(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "redact_video", lambda *a, **k: _result(tmp_path, CoverageReport(vehicle_frames=5))
+    )
+    assert cli.main(["clip.mp4"]) == 0
+    out = capsys.readouterr().out
+    assert "cabin" in out and "verified" in out
+    for name in ("face", "plate", "person"):
+        assert any(name in ln and "UNCHECKED" in ln for ln in out.splitlines())
+    assert "coverage  OK" not in out
+
+
+def test_summary_when_verification_skipped_is_not_silent(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "redact_video", lambda *a, **k: _result(tmp_path, None))
+    assert cli.main(["clip.mp4", "--no-verify"]) == 0
+    assert "NOT RUN" in capsys.readouterr().out
+
+
+def test_zero_sightings_prints_unchecked_cabin(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "redact_video", lambda *a, **k: _result(tmp_path, CoverageReport(vehicle_frames=0))
+    )
+    cli.main(["clip.mp4"])
+    assert any("cabin" in ln and "UNCHECKED" in ln for ln in capsys.readouterr().out.splitlines())
+
+
+def test_require_verified_flag_is_passed_through(tmp_path, monkeypatch):
+    seen = {}
+
+    def _fake(*a, **k):
+        seen.update(k)
+        return _result(tmp_path, CoverageReport(vehicle_frames=1))
+
+    monkeypatch.setattr(cli, "redact_video", _fake)
+    cli.main(["clip.mp4", "--require-verified", "cabin", "--require-verified", "face"])
+    assert seen["require_verified"] == ("cabin", "face")
+
+
+def test_required_unchecked_class_exits_two(monkeypatch, capsys):
+    from redactcam.coverage import RequiredClassError
+
+    def _boom(*a, **k):
+        rep = CoverageReport(vehicle_frames=1)
+        raise RequiredClassError("required privacy classes not verified: face", rep, {"face": rep.classes["face"]})
+
+    monkeypatch.setattr(cli, "redact_video", _boom)
+    assert cli.main(["clip.mp4", "--require-verified", "face"]) == 2
+    assert "not verified" in capsys.readouterr().err.lower()
+
+
 class TestIdentityFlags:
     @pytest.fixture(autouse=True)
     def _fixed(self, monkeypatch):

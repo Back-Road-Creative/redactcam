@@ -23,6 +23,7 @@ encode rather than after it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 import cv2
@@ -46,18 +47,171 @@ class Leak:
     box: Box
 
 
+SCHEMA_VERSION = 1
+
+#: The privacy classes a verification result speaks about, in report order.
+CLASSES = ("cabin", "face", "plate", "person")
+
+
+class Status(StrEnum):
+    """What the verifier can honestly say about one privacy class.
+
+    ``UNCHECKED`` is not a softer ``VERIFIED``: it means no independent check ran,
+    so nothing is known. It must never be shown, summed or gated as a pass."""
+
+    VERIFIED = "verified"
+    FAILED = "failed"
+    UNCHECKED = "unchecked"
+
+
+@dataclass(frozen=True)
+class ClassCoverage:
+    """One privacy class's verdict, the evidence behind it, and what it cannot see.
+
+    ``checked`` is how many items the verifier examined and ``misses`` how many of
+    those it found uncovered; ``basis`` says what the verdict rests on and
+    ``limitation`` what it does not establish."""
+
+    name: str
+    status: Status
+    basis: str
+    limitation: str = ""
+    checked: int = 0
+    misses: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status.value,
+            "basis": self.basis,
+            "limitation": self.limitation,
+            "checked": self.checked,
+            "misses": self.misses,
+        }
+
+
+_NO_VERIFIER = (
+    "no independent verifier runs for this class, so its recall is unmeasured; "
+    "the blur may or may not have covered every {name} in the footage"
+)
+_UNCHECKED_BASIS = {
+    "face": "detection recall is not measured by cabin verification",
+    "plate": (
+        "plates are used only to corroborate vehicles; whether the mask covers "
+        "every plate is not checked"
+    ),
+    "person": "detection recall is not measured by cabin verification",
+}
+
+
+class RequiredClassError(RuntimeError):
+    """A class the caller requires to be verified is failed or unchecked.
+
+    ``.report`` is the verification result and ``.classes`` maps each offending
+    class to its :class:`ClassCoverage`."""
+
+    def __init__(self, message: str, report: CoverageReport, classes: dict[str, ClassCoverage]):
+        super().__init__(message)
+        self.report = report
+        self.classes = classes
+
+
 @dataclass
 class CoverageReport:
     """``vehicle_frames`` corroborated vehicle sightings were checked; each entry
-    in ``leaks`` is one the mask did not adequately cover. ``ok`` is the single
-    boolean a caller gates on before rendering."""
+    in ``leaks`` is one the mask did not adequately cover.
+
+    ``ok`` only means "no leak was found". It is NOT an all-clear: a run that
+    checked nothing has ``ok`` True. Gate on :attr:`classes` /
+    :meth:`require_verified` instead, which say per privacy class whether it was
+    verified, failed or never checked."""
 
     vehicle_frames: int = 0
     leaks: list[Leak] = field(default_factory=list)
+    plate_corroborated: bool = True
 
     @property
     def ok(self) -> bool:
         return not self.leaks
+
+    @property
+    def classes(self) -> dict[str, ClassCoverage]:
+        """Per-class verdicts. Only ``cabin`` can be verified today; every other
+        class is ``UNCHECKED`` — cabin coverage says nothing about faces, plates
+        or pedestrians."""
+        n, bad = self.vehicle_frames, len(self.leaks)
+        if bad:
+            cabin = ClassCoverage(
+                "cabin",
+                Status.FAILED,
+                f"{bad} of {n} sampled vehicle sightings have a cabin the mask left uncovered",
+                checked=n,
+                misses=bad,
+            )
+        elif n:
+            how = (
+                "plate-corroborated vehicles"
+                if self.plate_corroborated
+                else "vehicles (no plate model: signs and billboards are not filtered out)"
+            )
+            cabin = ClassCoverage(
+                "cabin",
+                Status.VERIFIED,
+                f"mask covers the cabin of all {n} sampled {how} found by an independent re-detection",
+                "vehicles the independent detector missed, or that were never plate-corroborated, are not checked",
+                checked=n,
+            )
+        else:
+            cabin = ClassCoverage(
+                "cabin",
+                Status.UNCHECKED,
+                "no vehicle was found and checked in the sampled frames",
+                "zero sightings means no vehicle appeared or the detector missed them; "
+                "that is not evidence the footage has no occupants",
+            )
+        out = {"cabin": cabin}
+        for name in CLASSES[1:]:
+            out[name] = ClassCoverage(
+                name, Status.UNCHECKED, _UNCHECKED_BASIS[name], _NO_VERIFIER.format(name=name)
+            )
+        return out
+
+    @property
+    def all_verified(self) -> bool:
+        """True only when every class in ``CLASSES`` is VERIFIED."""
+        return all(c.status is Status.VERIFIED for c in self.classes.values())
+
+    def require_verified(self, *names: str) -> None:
+        """Raise :class:`RequiredClassError` unless each named class is VERIFIED.
+
+        A class that is failed *or unchecked* refuses; an unknown class name is a
+        ``ValueError`` rather than a silent pass."""
+        bad_names = [n for n in names if n not in CLASSES]
+        if bad_names:
+            raise ValueError(f"unknown privacy class {bad_names[0]!r}; expected one of {CLASSES}")
+        cls = self.classes
+        bad = {n: cls[n] for n in names if cls[n].status is not Status.VERIFIED}
+        if bad:
+            detail = ", ".join(f"{n} {c.status.value}" for n, c in bad.items())
+            raise RequiredClassError(
+                f"required privacy classes not verified: {detail}. Refusing: unchecked "
+                "is unknown, not safe.",
+                self,
+                bad,
+            )
+
+    def to_dict(self) -> dict:
+        """Stable, JSON-serialisable result contract for consumers."""
+        return {
+            "schema": SCHEMA_VERSION,
+            "ok": self.ok,
+            "all_verified": self.all_verified,
+            "vehicle_frames": self.vehicle_frames,
+            "classes": {n: c.to_dict() for n, c in self.classes.items()},
+            "leaks": [
+                {"frame": lk.frame, "coverage": lk.coverage, "box": list(lk.box)}
+                for lk in self.leaks
+            ],
+        }
 
 
 def cabin_region(box: Box, frac: float, w: int, h: int) -> tuple[int, int, int, int]:
@@ -118,7 +272,7 @@ def verify_cabin_coverage(
     fps = cap_in.get(cv2.CAP_PROP_FPS) or 60.0
     step = max(1, round(fps / sample_fps)) if sample_fps > 0 else 1
     tiles = None
-    rep = CoverageReport()
+    rep = CoverageReport(plate_corroborated=plate_det is not None)
     idx = 0
     while True:
         ok_i, frame = cap_in.read()

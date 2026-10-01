@@ -82,3 +82,86 @@ def test_plateless_vehicle_not_checked(tmp_path, monkeypatch):
     _stub(monkeypatch, [(0, 0, 5, 5)])  # plate detected but OUTSIDE the vehicle box
     rep = _run(tmp_path, np.zeros((H, W), np.uint8))
     assert rep.vehicle_frames == 0 and rep.ok
+
+
+# --- per-class verification state (RC-1) -------------------------------------
+
+
+def _report(frames=0, leaks=(), plate=True):
+    return bc.CoverageReport(frames, list(leaks), plate)
+
+
+def test_cabin_only_pass_is_not_an_all_classes_pass():
+    rep = _report(frames=5)
+    assert rep.ok  # no leak found
+    cls = rep.classes
+    assert cls["cabin"].status is bc.Status.VERIFIED and cls["cabin"].checked == 5
+    for name in ("face", "plate", "person"):
+        assert cls[name].status is bc.Status.UNCHECKED
+        assert cls[name].limitation  # says what it cannot see
+    assert not rep.all_verified
+
+
+def test_zero_sightings_is_unchecked_not_verified():
+    rep = _report(frames=0)
+    assert rep.ok
+    assert rep.classes["cabin"].status is bc.Status.UNCHECKED
+    assert not rep.all_verified
+
+
+def test_leaks_fail_the_cabin_class():
+    rep = _report(frames=4, leaks=[bc.Leak(1, 0.0, VEH)])
+    cabin = rep.classes["cabin"]
+    assert cabin.status is bc.Status.FAILED and cabin.misses == 1 and cabin.checked == 4
+
+
+def test_no_plate_model_is_disclosed_in_the_basis():
+    assert "no plate model" in _report(frames=2, plate=False).classes["cabin"].basis
+
+
+def test_require_verified_refuses_unchecked_and_failed():
+    rep = _report(frames=5)
+    rep.require_verified("cabin")  # verified: fine
+    try:
+        rep.require_verified("cabin", "face")
+    except bc.RequiredClassError as exc:
+        assert set(exc.classes) == {"face"} and exc.report is rep
+    else:
+        raise AssertionError("an unchecked required class must refuse")
+    failed = _report(frames=1, leaks=[bc.Leak(0, 0.0, VEH)])
+    try:
+        failed.require_verified("cabin")
+    except bc.RequiredClassError:
+        pass
+    else:
+        raise AssertionError("a failed required class must refuse")
+
+
+def test_require_verified_rejects_unknown_class_names():
+    try:
+        _report(frames=1).require_verified("vehicle")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a typo must not become a silent pass")
+
+
+def test_to_dict_is_a_stable_json_contract():
+    import json
+
+    d = json.loads(json.dumps(_report(3, [bc.Leak(2, 0.25, VEH)]).to_dict()))
+    assert d["schema"] == bc.SCHEMA_VERSION == 1
+    assert d["ok"] is False and d["all_verified"] is False
+    assert set(d["classes"]) == {"cabin", "face", "plate", "person"}
+    assert d["classes"]["cabin"]["status"] == "failed"
+    assert d["classes"]["face"]["status"] == "unchecked"
+    assert d["leaks"] == [{"frame": 2, "coverage": 0.25, "box": list(VEH)}]
+
+
+def test_verifier_records_whether_plates_corroborated(tmp_path, monkeypatch):
+    _stub(monkeypatch, [PLATE_IN])
+    mask = np.zeros((H, W), np.uint8)
+    mask[20:56, 40:140] = 255
+    assert _run(tmp_path, mask).plate_corroborated is True
+    monkeypatch.setattr(bc, "build_plate_detector", lambda *a, **k: None)
+    assert _run(tmp_path, mask).plate_corroborated is False
