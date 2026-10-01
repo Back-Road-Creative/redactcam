@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def redact_video(
     blur_strength: int = _apply.REFERENCE_BLUR_STRENGTH,
     verify: bool = True,
     min_coverage: float = 0.5,
+    require_verified: Iterable[str] = (),
     reuse_sidecar: bool = True,
     render: bool = True,
 ) -> RedactionResult:
@@ -103,6 +105,12 @@ def redact_video(
     sidecar to feed into your own encode.
 
     Raises ``CoverageError`` when verification finds an uncovered vehicle cabin.
+
+    ``require_verified`` names privacy classes (``cabin``, ``face``, ``plate``,
+    ``person``) that must be VERIFIED, not merely un-failed. A required class that
+    is failed or unchecked raises ``RequiredClassError`` before any render; with
+    ``verify=False`` nothing is verified, so requiring any class always refuses.
+    Today only ``cabin`` can be verified (see ``CoverageReport.classes``).
     """
     source_video = Path(source_video)
     work = Path(work_dir) if work_dir else source_video.parent
@@ -170,6 +178,11 @@ def redact_video(
                 "render: a driver would ship unblurred.",
                 report,
             )
+
+    required = tuple(require_verified)
+    if required:
+        # No report (verify=False, or no vehicle model) means nothing was checked.
+        (report or CoverageReport()).require_verified(*required)
 
     output = None
     if render:
