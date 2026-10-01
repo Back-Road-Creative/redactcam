@@ -17,6 +17,7 @@ import hashlib
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import apply as _apply
@@ -34,6 +35,7 @@ from .presets import (
     ROAD_FOOTAGE_BOX_DILATION_PX,
     ROAD_FOOTAGE_FEATHER_PX,
 )
+from .provenance import model_identity, runtime_identity, write_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ class RedactionResult:
     face_detections: int
     plate_detections: int
     coverage: CoverageReport | None
+    receipt: Path | None = None  # JSON identity of what produced this run; see provenance
 
 
 def file_hash(path: str | Path, block: int = 1 << 20) -> str:
@@ -111,6 +114,9 @@ def redact_video(
     is failed or unchecked raises ``RequiredClassError`` before any render; with
     ``verify=False`` nothing is verified, so requiring any class always refuses.
     Today only ``cabin`` can be verified (see ``CoverageReport.classes``).
+
+    A ``<stem>_redactcam_receipt.json`` naming the exact code, model files and
+    native runtime is written beside the mask on every completed run.
     """
     source_video = Path(source_video)
     work = Path(work_dir) if work_dir else source_video.parent
@@ -134,7 +140,9 @@ def redact_video(
     if tl is not None and tl.source_hash == source_hash:
         logger.info("reusing timeline %s (hash match)", sidecar_path.name)
         n_face = n_plate = -1  # not re-counted on a reuse
+        detection = "reused_sidecar"
     else:
+        detection = "fresh"
         frame_boxes, decoded, n_face, n_plate = detect_and_track(source_video, **opts)
         # The decoded count is authoritative: container metadata routinely lies,
         # and a mask one frame short blurs the wrong pixels for the whole tail.
@@ -196,6 +204,26 @@ def redact_video(
             strength=blur_strength,
         )
 
+    receipt_path = write_receipt(
+        work / f"{stem}_redactcam_receipt.json",
+        _build_receipt(
+            source_hash=source_hash,
+            output=output,
+            models=model_identity(paths),
+            detection=detection,
+            report=report,
+            verify=verify,
+            settings={
+                "render": render,
+                "blur_strength": blur_strength,
+                "min_coverage": min_coverage,
+                "box_dilation_px": box_dilation_px,
+                "feather_px": feather_px,
+                "detect": {k: v for k, v in opts.items() if not k.endswith("_model_path")},
+            },
+        ),
+    )
+
     return RedactionResult(
         sidecar=sidecar_path,
         mask=mask_path,
@@ -204,4 +232,55 @@ def redact_video(
         face_detections=n_face,
         plate_detections=n_plate,
         coverage=report,
+        receipt=receipt_path,
     )
+
+
+RECEIPT_SCHEMA = "redactcam.render-receipt/v1"
+
+
+def _hash_or_none(path: Path | None) -> str | None:
+    """SHA256 of ``path``; ``None`` when there is no output or it cannot be read
+    (recorded as unknown rather than failing a run that already rendered)."""
+    if path is None:
+        return None
+    try:
+        return file_hash(path)
+    except OSError:
+        return None
+
+
+def _build_receipt(
+    *,
+    source_hash: str,
+    output: Path | None,
+    models: dict,
+    detection: str,
+    report: CoverageReport | None,
+    verify: bool,
+    settings: dict,
+) -> dict:
+    """The render receipt: what ran, on what, with which files.
+
+    ``detection`` is ``"reused_sidecar"`` when the timeline came from disk. The
+    sidecar records the source hash but not what produced it, so for a reused
+    timeline the code and models named here are the ones that built the mask and
+    render, not necessarily the ones that detected. Delete the sidecar (or pass
+    ``reuse_sidecar=False``) when the detection identity matters.
+    """
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "generated_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "identity": runtime_identity(),
+        "models": models,
+        "source_sha256": source_hash,
+        "output_sha256": _hash_or_none(output),
+        "detection": detection,
+        "coverage": {
+            "checked": report is not None,
+            "ok": report.ok if report is not None else None,
+            "vehicle_frames": report.vehicle_frames if report is not None else None,
+            "leaks": len(report.leaks) if report is not None else None,
+        },
+        "settings": settings,
+    }

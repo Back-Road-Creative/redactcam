@@ -61,6 +61,12 @@ from .presets import (
     ROAD_FOOTAGE_BOX_DILATION_PX,
     ROAD_FOOTAGE_FEATHER_PX,
 )
+from .provenance import (
+    StaleInstallError,
+    check_current,
+    model_identity,
+    runtime_identity,
+)
 from .timeline import (
     BlurTimeline,
     build_timeline,
@@ -131,6 +137,11 @@ __all__ = [
     "cabin_region",
     "plate_inside",
     "verify_cabin_coverage",
+    # provenance
+    "runtime_identity",
+    "model_identity",
+    "check_current",
+    "StaleInstallError",
     # models
     "ModelSpec",
     "resolve_model",
