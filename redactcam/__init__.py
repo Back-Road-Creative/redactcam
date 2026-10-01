@@ -19,7 +19,17 @@ from .apply import (
     blur_radius,
     require_ffmpeg,
 )
-from .coverage import CoverageReport, Leak, cabin_region, plate_inside, verify_cabin_coverage
+from .coverage import (
+    CLASSES,
+    ClassCoverage,
+    CoverageReport,
+    Leak,
+    RequiredClassError,
+    Status,
+    cabin_region,
+    plate_inside,
+    verify_cabin_coverage,
+)
 from .detect import (
     ALLOW_CPU_ENV,
     Box,
@@ -127,6 +137,10 @@ __all__ = [
     "FfmpegUnavailableError",
     # coverage
     "CoverageReport",
+    "ClassCoverage",
+    "RequiredClassError",
+    "Status",
+    "CLASSES",
     "Leak",
     "cabin_region",
     "plate_inside",
