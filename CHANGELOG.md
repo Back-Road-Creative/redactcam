@@ -27,6 +27,16 @@ All notable changes to this project are documented here. The format follows
 - **Stale-install detection.** `redactcam --identity`, `--expect-revision`,
   `--expect-code-sha256`, `--expect-version` and `redactcam.check_current()`;
   an install whose identity cannot be determined never passes.
+- **`--check-deps` checks ffmpeg/ffprobe and supplied models.** A missing or broken
+  ffmpeg exits 1 with the install line (`--skip-ffmpeg` opts out; the Windows
+  release smoke test uses it). With `--model KIND=PATH` each file is hashed,
+  loaded and run on a blank frame.
+- **Clean-machine qualification.** `redactcam --check-deps --receipt FILE` with all
+  four `--model` files renders a synthetic clip end to end and writes a versioned
+  receipt; exits 0 only if qualified. Never downloads weights.
+- `redact_video()` now raises `FfmpegUnavailableError` (with install instructions)
+  before detection when ffmpeg or ffprobe is unusable, instead of failing at the
+  mask stage after the whole detection pass.
 
 ### Changed
 

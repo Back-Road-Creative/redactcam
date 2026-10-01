@@ -12,7 +12,13 @@ Five stages, each usable on its own:
 ``pipeline.redact_video`` wires all five together for the common case.
 """
 
-from .apply import apply_blur, blur_filter_complex, blur_radius
+from .apply import (
+    FfmpegUnavailableError,
+    apply_blur,
+    blur_filter_complex,
+    blur_radius,
+    require_ffmpeg,
+)
 from .coverage import (
     CLASSES,
     ClassCoverage,
@@ -127,6 +133,8 @@ __all__ = [
     "blur_radius",
     "blur_filter_complex",
     "apply_blur",
+    "require_ffmpeg",
+    "FfmpegUnavailableError",
     # coverage
     "CoverageReport",
     "ClassCoverage",

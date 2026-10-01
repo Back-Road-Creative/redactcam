@@ -6,9 +6,11 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
-from . import provenance
+from . import provenance, qualify
+from .apply import FFMPEG_INSTALL_HINT, FFMPEG_TOOLS, tool_status
 from .coverage import CLASSES, RequiredClassError
 from .models import DEFAULT_MODELS, ModelSpec
 from .pipeline import CoverageError, redact_video
@@ -76,7 +78,26 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--check-deps",
         action="store_true",
-        help="load the native extensions, report their versions, and exit; takes no input",
+        help=(
+            "load the native extensions, check ffmpeg/ffprobe, verify any --model files "
+            "load, report versions, and exit; takes no input"
+        ),
+    )
+    p.add_argument(
+        "--skip-ffmpeg",
+        action="store_true",
+        help="with --check-deps: do not require ffmpeg/ffprobe (for a build smoke test "
+        "on a runner that has none; not valid with --receipt)",
+    )
+    p.add_argument(
+        "--receipt",
+        type=Path,
+        metavar="FILE",
+        help=(
+            "with --check-deps: qualify this machine and write a versioned clean-machine "
+            "receipt. Needs all four --model KIND=PATH files (nothing is downloaded); runs "
+            "one synthetic clip through the whole pipeline; exits 0 only if qualified"
+        ),
     )
     p.add_argument(
         "--identity",
@@ -112,22 +133,48 @@ def _check_inference_providers_for_check() -> list[str]:
     return check_inference_providers()
 
 
-def _check_deps() -> int:
+def _ffmpeg_tools_for_check() -> dict[str, dict]:
+    """Indirection so the ffmpeg check can be driven in a test on any machine."""
+    return {name: tool_status(name) for name in FFMPEG_TOOLS}
+
+
+def _check_deps(
+    models: dict[str, ModelSpec] | None = None,
+    *,
+    receipt: Path | None = None,
+    skip_ffmpeg: bool = False,
+    work_dir: Path | None = None,
+) -> int:
     """Load the native extensions, use them, and say what loaded.
 
-    This is for the frozen Windows build. PyInstaller resolves OpenCV and
-    onnxruntime through hooks, and a miss surfaces only when someone runs a real
-    detection -- while the release smoke test was ``--help``, which never touches
-    onnxruntime, because detect.py imports it inside a function. The installer
-    could therefore ship an executable that could not detect anything with every
-    gate green.
+    This is for the frozen Windows build and for a first run on a clean machine.
+    PyInstaller resolves OpenCV and onnxruntime through hooks, and a miss surfaces
+    only when someone runs a real detection -- while the release smoke test was
+    ``--help``, which never touches onnxruntime, because detect.py imports it
+    inside a function. The installer could therefore ship an executable that
+    could not detect anything with every gate green.
 
     Importing alone would not prove much, so this builds a real SessionOptions
-    through the same helper the detectors call. It needs no video and no model
-    file on purpose: the weights are a ~110 MB download and a release runner has
-    neither.
+    through the same helper the detectors call. With no ``--model`` it needs no
+    video and no model file: the weights are a ~110 MB download and a release
+    runner has neither. ffmpeg and ffprobe are checked because the mask render
+    and the blur composite shell out to them; ``--model`` files are loaded and run
+    once, never downloaded.
+
+    With ``receipt`` it is a qualification: every check runs even after one
+    fails (so the receipt says everything that is wrong, not the first thing),
+    all four models are required, a synthetic clip is rendered, and the receipt
+    is written whatever happened. Exit 0 only if it qualified.
     """
     from .detect import GpuProviderUnavailableError, _import_onnxruntime
+
+    models = models or {}
+    diag: dict = {"errors": []}
+    errors: list[str] = diag["errors"]
+
+    def fail(msg: str) -> None:
+        print(f"redactcam: {msg}", file=sys.stderr)
+        errors.append(msg)
 
     try:
         import cv2
@@ -135,35 +182,67 @@ def _check_deps() -> int:
         opts = _session_options_for_check(1)
         ort = _import_onnxruntime()
     except ImportError as exc:
-        print(f"redactcam: a native dependency did not load: {exc}", file=sys.stderr)
-        return 1
+        fail(f"a native dependency did not load: {exc}")
+    else:
+        providers = list(ort.get_available_providers())
+        print(f"opencv          {cv2.__version__}")
+        print(f"onnxruntime     {ort.__version__}")
+        print(f"providers       {', '.join(providers)}")
+        print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
+        diag.update(opencv=cv2.__version__, onnxruntime=ort.__version__, providers=providers)
+        # The provider LIST above is what the wheel advertises; this line is the
+        # decision a detector makes from it — and it is where a GPU build that lost
+        # CUDA fails, instead of exiting 0 and running on CPU for a day.
+        try:
+            inference = _check_inference_providers_for_check()
+        except GpuProviderUnavailableError as exc:
+            fail(str(exc))
+        else:
+            print(f"inference       {inference[0]}")
+            diag["inference"] = inference[0]
 
-    print(f"opencv          {cv2.__version__}")
-    print(f"onnxruntime     {ort.__version__}")
-    print(f"providers       {', '.join(ort.get_available_providers())}")
-    print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
-    # The provider LIST above is what the wheel advertises; this line is the
-    # decision a detector makes from it — and it is where a GPU build that lost
-    # CUDA fails, instead of exiting 0 and running on CPU for a day.
-    try:
-        inference = _check_inference_providers_for_check()
-    except GpuProviderUnavailableError as exc:
-        print(f"redactcam: {exc}", file=sys.stderr)
-        return 1
-    print(f"inference       {inference[0]}")
-    return 0
+    if skip_ffmpeg:
+        print("ffmpeg          skipped (--skip-ffmpeg)")
+    else:
+        tools = _ffmpeg_tools_for_check()
+        broken = False
+        for name, status in tools.items():
+            diag[name] = status
+            if status["error"]:
+                fail(status["error"])
+                broken = True
+            else:
+                print(f"{name:<15} {status['version']}")
+        if broken:
+            print(f"redactcam: {FFMPEG_INSTALL_HINT}", file=sys.stderr)
 
+    qualifying = receipt is not None
+    model_results: dict[str, dict] = {}
+    if models or qualifying:
+        model_results = qualify.check_models(models, require_all=qualifying)
+        for kind, m in model_results.items():
+            if m["status"] == "ok":
+                print(f"model {kind:<9} ok  {m['sha256'][:12]}  {m['provider']}")
+            else:
+                fail(m["error"])
 
-def _models(pairs: list[str]) -> dict[str, ModelSpec]:
-    out: dict[str, ModelSpec] = {}
-    for pair in pairs:
-        kind, _, path = pair.partition("=")
-        if not path:
-            raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
-        if kind not in DEFAULT_MODELS:
-            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
-        out[kind] = ModelSpec(name=kind, path=path)
-    return out
+    if not qualifying:
+        return 1 if errors else 0
+
+    render = {"attempted": False, "ok": False, "error": "skipped: an earlier check failed"}
+    if not errors:
+        with tempfile.TemporaryDirectory(prefix="redactcam-qualify-") as tmp:
+            render = qualify.synthetic_render(models, work_dir or Path(tmp))
+        if render.get("ok"):
+            print(f"render          ok  {render['frames']} frames  {render['output_sha256'][:12]}")
+        else:
+            fail(f"synthetic render failed: {render.get('error')}")
+    result = qualify.build_clean_machine_receipt(
+        diagnostics=diag, models=model_results, render=render
+    )
+    provenance.write_receipt(receipt, result)
+    print(f"receipt         {receipt} qualified={str(result['qualified']).lower()}")
+    return 0 if result["qualified"] else 1
 
 
 def _check_expectations(args: argparse.Namespace) -> int:
@@ -179,6 +258,18 @@ def _check_expectations(args: argparse.Namespace) -> int:
         return 1
     print("identity        matches the expected build")
     return 0
+
+
+def _models(pairs: list[str]) -> dict[str, ModelSpec]:
+    out: dict[str, ModelSpec] = {}
+    for pair in pairs:
+        kind, _, path = pair.partition("=")
+        if not path:
+            raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
+        if kind not in DEFAULT_MODELS:
+            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
+        out[kind] = ModelSpec(name=kind, path=path)
+    return out
 
 
 def _print_coverage(report) -> None:
@@ -201,11 +292,20 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    if (args.receipt or args.skip_ffmpeg) and not args.check_deps:
+        parser.error("--receipt and --skip-ffmpeg only apply together with --check-deps")
+    if args.receipt and args.skip_ffmpeg:
+        parser.error("--receipt qualifies a machine to render, so it cannot skip ffmpeg")
     expecting = args.expect_version or args.expect_code_sha256 or args.expect_revision
     if args.check_deps or expecting or args.identity:
         rc = 0
         if args.check_deps:
-            rc = _check_deps()
+            rc = _check_deps(
+                _models(args.model),
+                receipt=args.receipt,
+                skip_ffmpeg=args.skip_ffmpeg,
+                work_dir=args.work_dir,
+            )
         if expecting:
             rc = max(rc, _check_expectations(args))
         if args.identity:

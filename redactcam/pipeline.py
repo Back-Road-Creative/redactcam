@@ -23,6 +23,7 @@ from pathlib import Path
 from . import apply as _apply
 from . import mask as _mask
 from . import timeline as _timeline
+from .apply import require_ffmpeg
 from .coverage import CoverageReport, verify_cabin_coverage
 from .detect import detect_and_track
 from .models import (
@@ -107,7 +108,9 @@ def redact_video(
     time. ``render=False`` stops after verification, leaving you the mask and the
     sidecar to feed into your own encode.
 
-    Raises ``CoverageError`` when verification finds an uncovered vehicle cabin.
+    Raises ``CoverageError`` when verification finds an uncovered vehicle cabin,
+    and ``FfmpegUnavailableError`` (before any detection) when ffmpeg/ffprobe are
+    not usable.
 
     ``require_verified`` names privacy classes (``cabin``, ``face``, ``plate``,
     ``person``) that must be VERIFIED, not merely un-failed. A required class that
@@ -118,6 +121,7 @@ def redact_video(
     A ``<stem>_redactcam_receipt.json`` naming the exact code, model files and
     native runtime is written beside the mask on every completed run.
     """
+    require_ffmpeg()
     source_video = Path(source_video)
     work = Path(work_dir) if work_dir else source_video.parent
     work.mkdir(parents=True, exist_ok=True)

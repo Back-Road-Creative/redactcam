@@ -16,6 +16,7 @@ def wired(monkeypatch, tmp_path):
     """Stub detection, mask rendering, model resolution and ffmpeg; record calls."""
     calls = []
 
+    monkeypatch.setattr(pl, "require_ffmpeg", lambda: {})
     monkeypatch.setattr(pl, "resolve_model", lambda spec, cache=None: tmp_path / f"{spec.name}.onnx")
     monkeypatch.setattr(pl._timeline, "probe_video", lambda p: (30.0, 90, 1920, 1080))
     monkeypatch.setattr(
@@ -240,3 +241,16 @@ class TestRenderReceipt:
         r = self._receipt(pl.redact_video(source, work_dir=tmp_path / "work", verify=False))
         assert r["models"]["plate"] is None
 
+
+def test_a_missing_ffmpeg_stops_the_run_before_detection(wired, source, tmp_path, monkeypatch):
+    """The mask render is the first ffmpeg call. Without a gate a missing binary
+    surfaces only after the whole detection pass."""
+    from redactcam.apply import FfmpegUnavailableError
+
+    def _absent():
+        raise FfmpegUnavailableError("ffmpeg was not found on PATH. Install FFmpeg")
+
+    monkeypatch.setattr(pl, "require_ffmpeg", _absent)
+    with pytest.raises(FfmpegUnavailableError, match="Install FFmpeg"):
+        pl.redact_video(source, work_dir=tmp_path / "work")
+    assert wired == []
