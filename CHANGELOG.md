@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Detection progress heartbeat.** `detect_and_track(progress_every_s=60.0)` logs
+  frame, percentage, detection count and fps about once a minute (wall clock) plus a
+  final `detect: done` line; `0` disables it. A 54 197-frame pass was silent for 4.5 h.
+  Logging only, results unchanged.
 - **Per-class verification result.** `CoverageReport.classes` reports `cabin`, `face`,
   `plate` and `person` each as `verified`, `failed` or `unchecked` with the evidence
   basis and its limitation; only `cabin` can be verified today, so a cabin-only pass

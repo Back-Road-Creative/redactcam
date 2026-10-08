@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -884,6 +885,7 @@ def detect_and_track(
     checkpoint_path: str | Path | None = None,
     checkpoint_every_frames: int = 0,
     checkpoint_overlap_frames: int = CHECKPOINT_OVERLAP_FRAMES,
+    progress_every_s: float = 60.0,
 ) -> tuple[dict[int, list[Box]], int, int, int]:
     """One decode pass producing DENSE per-frame privacy boxes.
 
@@ -988,6 +990,12 @@ def detect_and_track(
     before the detector first scores them). Emission also runs anchor interpolation — a track's
     between-detection gaps are filled with the straight line between bracketing detections, since flow
     freezes a small low-texture object between samples but two detections pin the true endpoints.
+
+    ``progress_every_s`` (wall-clock seconds, default 60; 0 disables) logs one INFO line
+    ``detect: frame N/TOTAL (P%), D detections so far, F fps`` per interval, plus a final
+    ``detect: done`` line, so a multi-hour pass is distinguishable from a hung one. TOTAL
+    and P are omitted when the container reports no frame count. Logging only; the
+    returned boxes are unchanged.
     """
     from .track import TrackManager
 
@@ -1053,6 +1061,9 @@ def detect_and_track(
                 frames_done,
             )
     last_checkpoint = frame_idx
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    t_start = last_progress = time.monotonic()
+    progress_start_idx = last_progress_idx = frame_idx
     # Adaptive plate cadence: between sparse samples a plate accelerating through a
     # close pass moves farther per frame than flow can follow, so the box lags and
     # the plate escapes (readable). While a plate track is fast, force plate-only
@@ -1162,6 +1173,22 @@ def detect_and_track(
                 plate_seen=len(plates) > 0 or len(vehicles) > 0,
             )
             frame_idx += 1
+            if progress_every_s > 0:
+                now = time.monotonic()
+                if now - last_progress >= progress_every_s:
+                    fps_now = (frame_idx - last_progress_idx) / max(now - last_progress, 1e-9)
+                    if total_frames > 0:
+                        pct = 100 * frame_idx / total_frames
+                        where = f"{frame_idx}/{total_frames} ({pct:.0f}%)"
+                    else:
+                        where = f"{frame_idx}"
+                    logger.info(
+                        "detect: frame %s, %d detections so far, %.1f fps",
+                        where,
+                        n_face + n_plate,
+                        fps_now,
+                    )
+                    last_progress, last_progress_idx = now, frame_idx
             # Snapshot only — the tracker keeps running, so an uninterrupted
             # pass returns exactly what it would have without checkpointing.
             if (
@@ -1194,4 +1221,10 @@ def detect_and_track(
     )
     if resumed:
         frame_boxes = _union_boxes(resumed, frame_boxes)
+    if progress_every_s > 0:
+        logger.info(
+            "detect: done, %d frames in %.0fs",
+            frame_idx - progress_start_idx,
+            time.monotonic() - t_start,
+        )
     return frame_boxes, frame_idx, n_face, n_plate
