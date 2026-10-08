@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Detection progress heartbeat.** `detect_and_track(progress_every_s=60.0)` logs
+  frame, percentage, detection count and fps about once a minute (wall clock) plus a
+  final `detect: done` line; `0` disables it. A 54 197-frame pass was silent for 4.5 h.
+  Logging only, results unchanged.
+
 ### Changed
 
 - **`onnxruntime` is no longer a base dependency — install `redactcam[cpu]` or

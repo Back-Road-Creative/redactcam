@@ -392,6 +392,11 @@ run is unchanged; a resume re-decodes `checkpoint_overlap_frames` (default 90)
 before the resume point and unions those boxes over the checkpointed ones. A
 checkpoint belonging to another video, or a corrupt one, is ignored.
 
+`detect_and_track(progress_every_s=60.0)` logs one INFO line
+(`detect: frame N/TOTAL (P%), D detections so far, F fps`) per wall-clock interval and a
+final `detect: done` line, so a multi-hour pass shows it is alive; `0` disables it. It
+only logs; the returned boxes are unchanged.
+
 **Tracking** — `TrackManager`, `Track`.
 
 **Timeline** — `build_timeline()`, `BlurTimeline`, `dilate_box()`,

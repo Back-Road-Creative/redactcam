@@ -941,3 +941,80 @@ class TestDetectionCheckpoint:
             video, checkpoint_path=ckpt, **self.CKPT, **self.KW
         )
         assert n_frames == 24 and len(boxes) == 24
+
+
+class TestDetectionProgressHeartbeat:
+    """A multi-hour pass used to log nothing between "model loaded" and the end
+    (4.5 h of silence on a 54 197-frame day video, 2026-10-08), so an operator could
+    not tell "working" from "hung". ``progress_every_s`` makes the loop log about
+    once per wall-clock interval. The clock is faked: one second per ``monotonic``
+    call, so the cadence is exact and the test never sleeps.
+    """
+
+    KW = TestDetectionCheckpoint.KW
+
+    @staticmethod
+    def _fake_clock(monkeypatch):
+        ticks = {"t": 0.0}
+
+        def monotonic():
+            ticks["t"] += 1.0
+            return ticks["t"]
+
+        monkeypatch.setattr(detect, "time", SimpleNamespace(monotonic=monotonic))
+
+    @staticmethod
+    def _progress(caplog):
+        return [r.getMessage() for r in caplog.records if r.getMessage().startswith("detect:")]
+
+    def test_progress_lines_are_logged_at_the_interval(self, tmp_path, monkeypatch, caplog):
+        self._fake_clock(monkeypatch)
+        video = _make_moving_video(tmp_path)  # 24 frames
+        with caplog.at_level("INFO", logger="redactcam.detect"):
+            detect_and_track(video, progress_every_s=5.0, **self.KW)
+        msgs = self._progress(caplog)
+        frame_lines = [m for m in msgs if m.startswith("detect: frame ")]
+        assert 2 <= len(frame_lines) <= 6, msgs
+        assert "/24" in frame_lines[0] and "%" in frame_lines[0] and "fps" in frame_lines[0]
+        assert msgs[-1].startswith("detect: done, 24 frames in "), msgs
+
+    def test_progress_does_not_change_the_result(self, tmp_path, monkeypatch, caplog):
+        video = _make_moving_video(tmp_path)
+        plain = detect_and_track(video, progress_every_s=0, **self.KW)
+        self._fake_clock(monkeypatch)
+        with caplog.at_level("INFO", logger="redactcam.detect"):
+            on = detect_and_track(video, progress_every_s=5.0, **self.KW)
+        assert [m for m in self._progress(caplog) if m.startswith("detect: frame ")]
+        assert on == plain
+
+    def test_zero_emits_no_progress_lines(self, tmp_path, monkeypatch, caplog):
+        self._fake_clock(monkeypatch)
+        video = _make_moving_video(tmp_path)
+        with caplog.at_level("INFO", logger="redactcam.detect"):
+            detect_and_track(video, progress_every_s=0, **self.KW)
+        assert self._progress(caplog) == []
+
+    def test_unknown_frame_total_drops_the_percentage(self, tmp_path, monkeypatch, caplog):
+        self._fake_clock(monkeypatch)
+        video = _make_moving_video(tmp_path)
+
+        real = cv2.VideoCapture
+
+        class NoCount:
+            """Delegating wrapper (subclassing cv2.VideoCapture segfaults at exit)."""
+
+            def __init__(self, *a):
+                self._cap = real(*a)
+
+            def get(self, prop):
+                return 0.0 if prop == cv2.CAP_PROP_FRAME_COUNT else self._cap.get(prop)
+
+            def __getattr__(self, name):
+                return getattr(self._cap, name)
+
+        fake_cv2 = SimpleNamespace(**{**vars(cv2), "VideoCapture": NoCount})
+        monkeypatch.setattr(detect, "cv2", fake_cv2)
+        with caplog.at_level("INFO", logger="redactcam.detect"):
+            detect_and_track(video, progress_every_s=5.0, **self.KW)
+        lines = [m for m in self._progress(caplog) if m.startswith("detect: frame ")]
+        assert lines and all("%" not in m and "/" not in m for m in lines), lines
