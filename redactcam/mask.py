@@ -46,17 +46,20 @@ def render_mask_frame(width: int, height: int, boxes: list[Box], feather_px: int
 
 
 def _count_frames(path: Path) -> int:
-    """Exact decoded frame count via ``ffprobe -count_frames`` (-1 on failure)."""
+    """Exact frame count of an FFV1 mask via ``ffprobe -count_packets`` (-1 on
+    failure). FFV1 is intra-only, one whole frame per packet, so a demux gives
+    the decoded count without decoding: 352,934 4K frames took 52 min to decode
+    on one core and take seconds to count this way."""
     out = subprocess.run(
         [
             "ffprobe",
             "-v",
             "error",
-            "-count_frames",
+            "-count_packets",
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=nb_read_frames",
+            "stream=nb_read_packets",
             "-of",
             "csv=p=0",
             str(path),

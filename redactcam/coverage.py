@@ -257,7 +257,7 @@ def verify_cabin_coverage(
     pixels while the driver, who sits near the cabin centre, stays covered.
 
     Reads the source and the mask in frame-locked lockstep — no seeking, so the
-    two can never silently drift apart. The confidence, size filter and plate
+    two can never silently drift apart; only sampled frames are decoded to pixels. The confidence, size filter and plate
     corroboration should mirror whatever produced the mask, so the check covers
     exactly the vehicles the blur is responsible for and not the roadside signage
     it deliberately leaves readable."""
@@ -275,11 +275,15 @@ def verify_cabin_coverage(
     rep = CoverageReport(plate_corroborated=plate_det is not None)
     idx = 0
     while True:
-        ok_i, frame = cap_in.read()
-        ok_m, mask = cap_m.read()
-        if not (ok_i and ok_m):
+        # Every frame of both is grabbed, so the two stay frame-locked; only the
+        # sampled ones are retrieved, which skips converting and copying the rest.
+        if not (cap_in.grab() and cap_m.grab()):
             break
         if idx % step == 0:
+            ok_i, frame = cap_in.retrieve()
+            ok_m, mask = cap_m.retrieve()
+            if not (ok_i and ok_m):
+                break
             h, w = frame.shape[:2]
             if tiles is None:
                 tiles = frame_tiles(w, h, 1280, 0.15)
