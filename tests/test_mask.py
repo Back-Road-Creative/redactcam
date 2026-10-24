@@ -120,3 +120,40 @@ def test_materialize_writes_exact_frame_count(tmp_path):
     out = bm.materialize_mask_video(_timeline(), tmp_path / "mask.mkv", feather_px=2)
     assert out.exists()
     assert bm._count_frames(out) == 5  # == source_frame_count, no drops
+
+
+def test_count_frames_counts_packets_not_decoded_frames(monkeypatch, tmp_path):
+    """The length check runs on a full-day 4K mask (352,934 frames on 2026-10-23):
+    decoding every frame took 52 min on one core. FFV1 is intra-only, one whole
+    frame per packet, so counting packets gives the same number from a demux."""
+    seen = {}
+
+    class _Out:
+        stdout = "7\n"
+
+    def _run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Out()
+
+    monkeypatch.setattr(bm.subprocess, "run", _run)
+    assert bm._count_frames(tmp_path / "m.mkv") == 7
+    assert "-count_packets" in seen["cmd"] and "stream=nb_read_packets" in seen["cmd"]
+    assert "-count_frames" not in seen["cmd"]
+
+
+@pytest.mark.skipif(not shutil.which("ffprobe"), reason="ffprobe required")
+def test_packet_count_equals_decoded_frame_count_on_a_real_mask(tmp_path):
+    """Equivalence: on a mask this module wrote, the packet count is the decoded
+    frame count ffprobe -count_frames reports."""
+    import subprocess
+
+    boxes = {i: [(2 + i % 9, 3, 8, 8)] for i in range(0, 37, 2)}
+    out = bm.materialize_mask_video(
+        _timeline(source_frame_count=37, frame_boxes=boxes), tmp_path / "m.mkv", feather_px=2
+    )
+    decoded = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert bm._count_frames(out) == int(decoded) == 37

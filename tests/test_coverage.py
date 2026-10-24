@@ -165,3 +165,84 @@ def test_verifier_records_whether_plates_corroborated(tmp_path, monkeypatch):
     assert _run(tmp_path, mask).plate_corroborated is True
     monkeypatch.setattr(bc, "build_plate_detector", lambda *a, **k: None)
     assert _run(tmp_path, mask).plate_corroborated is False
+
+
+# --- only sampled frames are decoded to pixels --------------------------------
+
+
+def _lockstep_clips(tmp_path, n=12, fps=6.0):
+    """Source frame i is gray level 5*i; the mask covers the cabin on even frames
+    only. A verifier that drifts a frame between the two reads the wrong level or
+    the wrong mask."""
+    inp, mvid = tmp_path / "in.mkv", tmp_path / "mask.mkv"
+    _write(inp, [np.full((H, W, 3), 5 * i, np.uint8) for i in range(n)], fps)
+    masks = []
+    for i in range(n):
+        m = np.zeros((H, W), np.uint8)
+        if i % 2 == 0:
+            m[20:56, 40:140] = 255
+        masks.append(m)
+    _write(mvid, masks, fps)
+    return inp, mvid
+
+
+def _verify(inp, mvid):
+    return bc.verify_cabin_coverage(
+        inp, mvid, "v.onnx", plate_model="p.onnx", sample_fps=2,
+        min_height_frac=0.0, ignore_bottom_frac=0.0,
+    )
+
+
+def test_sampled_frames_stay_in_lockstep(tmp_path, monkeypatch):
+    """Equivalence: fps 6 / sample 2 = every 3rd frame. The detector sees source
+    frames 0, 3, 6, 9 and the leaks are exactly the odd ones, 3 and 9."""
+    levels = []
+
+    class _Rec:
+        def detect(self, frame, conf):
+            levels.append(int(frame[0, 0, 0]))
+            return [VEH]
+
+    monkeypatch.setattr(bc, "build_vehicle_detector", lambda *a, **k: _Rec())
+    monkeypatch.setattr(bc, "build_plate_detector", lambda *a, **k: object())
+    monkeypatch.setattr(bc, "detect_plates", lambda *a, **k: [PLATE_IN])
+    rep = _verify(*_lockstep_clips(tmp_path))
+    assert levels == [0, 15, 30, 45]
+    assert rep.vehicle_frames == 4 and [lk.frame for lk in rep.leaks] == [3, 9]
+
+
+def test_unsampled_frames_are_grabbed_not_decoded_to_pixels(tmp_path, monkeypatch):
+    """A full day is 352,934 4K frames and the verifier samples 1 in 15 at 60 fps.
+    Every frame is still grabbed (lockstep, no seeking); only sampled ones are
+    retrieved, which skips the BGR conversion and copy of the rest."""
+    _stub(monkeypatch, [PLATE_IN])
+    inp, mvid = _lockstep_clips(tmp_path)
+    real = cv2.VideoCapture
+    counts = []
+
+    class _Counting:
+        def __init__(self, path):
+            self._cap = real(path)
+            self.n = {"read": 0, "grab": 0, "retrieve": 0}
+            counts.append(self.n)
+
+        def __getattr__(self, name):
+            return getattr(self._cap, name)
+
+        def read(self):
+            self.n["read"] += 1
+            return self._cap.read()
+
+        def grab(self):
+            self.n["grab"] += 1
+            return self._cap.grab()
+
+        def retrieve(self):
+            self.n["retrieve"] += 1
+            return self._cap.retrieve()
+
+    monkeypatch.setattr(bc.cv2, "VideoCapture", _Counting)
+    rep = _verify(inp, mvid)
+    assert rep.vehicle_frames == 4
+    for n in counts:  # source, mask
+        assert n["read"] + n["retrieve"] == 4
