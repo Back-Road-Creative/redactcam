@@ -110,18 +110,28 @@ def materialize_mask_video(timeline: BlurTimeline, output_path: Path, feather_px
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
+    sent = 0
     try:
-        for idx in range(n):
-            frame = render_mask_frame(w, h, active_boxes_at(timeline, idx), feather_px)
-            proc.stdin.write(frame.tobytes())
-        proc.stdin.close()
+        try:
+            for idx in range(n):
+                frame = render_mask_frame(w, h, active_boxes_at(timeline, idx), feather_px)
+                proc.stdin.write(frame.tobytes())
+                sent += 1
+            proc.stdin.close()
+        except BrokenPipeError:
+            # ffmpeg exited mid-stream; its exit code and stderr say why, the
+            # broken pipe on our side does not.
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
         rc = proc.wait()
     finally:
         if proc.poll() is None:
             proc.kill()
     if rc != 0:
         err = proc.stderr.read().decode(errors="replace")[-500:] if proc.stderr else ""
-        raise RuntimeError(f"mask ffmpeg failed (rc={rc}): {err}")
+        raise RuntimeError(f"mask ffmpeg failed (rc={rc}) after {sent} of {n} frames: {err}")
     written = _count_frames(output_path)
     if written != n:
         raise RuntimeError(

@@ -67,6 +67,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An ffmpeg that dies while `materialize_mask_video` is still piping frames now
+  raises `mask ffmpeg failed (rc=N) after K of N frames: <ffmpeg stderr>` instead of
+  a bare `[Errno 32] Broken pipe`, which threw away ffmpeg's reason. A 352 934-frame
+  4K mask rebuild failed this way with nothing to go on.
 - Two objects visible at once no longer collapse onto one track, leaving one of
   them unblurred. Association had no per-frame exclusivity — nothing marked a
   track as already matched — and its center-distance fallback gate was sized by
