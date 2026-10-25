@@ -116,6 +116,21 @@ def test_frame_count_mismatch_is_fatal(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_ffmpeg_dying_mid_write_reports_its_own_error(tmp_path):
+    """An ffmpeg that exits while frames are still being piped surfaces as a broken
+    pipe on the parent's write. The error must carry ffmpeg's exit code and stderr,
+    not a bare "[Errno 32] Broken pipe" that says nothing about why."""
+    out = tmp_path / "mask.mkv"
+    out.mkdir()  # ffmpeg cannot open a directory as its output, so it exits at once
+    # 512x512 gray frames (256 KB) overflow the 64 KB pipe buffer on the first write.
+    tl = _timeline(frame_width=512, frame_height=512, source_frame_count=20)
+    with pytest.raises(RuntimeError, match=r"mask ffmpeg failed \(rc=[1-9]") as exc:
+        bm.materialize_mask_video(tl, out)
+    assert "mask.mkv" in str(exc.value)  # ffmpeg's own message names the output
+    assert "of 20 frames" in str(exc.value)  # says how far the stream got
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 def test_materialize_writes_exact_frame_count(tmp_path):
     out = bm.materialize_mask_video(_timeline(), tmp_path / "mask.mkv", feather_px=2)
     assert out.exists()
