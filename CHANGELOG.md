@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **NVDEC frame source.** `redactcam.frames.iter_frames` feeds `detect_and_track` and
+  `detect_regions` from either OpenCV or `ffmpeg -hwaccel cuda -c:v *_cuvid` over a
+  full-frame pipe reader (`decode=` argument, `REDACTCAM_DECODE=cv2|nvdec|auto`).
+  `auto` falls back to cv2 unless ffmpeg has cuda, the matching cuvid decoder and a
+  working 1-frame probe; rotated clips, unsupported codecs and checkpoint resumes
+  use cv2. A mid-stream decoder failure raises instead of truncating. Frame indices,
+  sampling and results are identical; the backend is logged as `decode=`.
 - **Detection progress heartbeat.** `detect_and_track(progress_every_s=60.0)` logs
   frame, percentage, detection count and fps about once a minute (wall clock) plus a
   final `detect: done` line; `0` disables it. A 54 197-frame pass was silent for 4.5 h.
