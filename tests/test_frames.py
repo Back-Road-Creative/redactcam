@@ -218,6 +218,7 @@ class TestDetectParity:
             return real(self, idx, gray, dets)
 
         monkeypatch.setattr(track.TrackManager, "step", spy)
+        monkeypatch.setattr(detect, "build_detectors", lambda *a, **k: (None, None))
         monkeypatch.setattr(detect, "detect_tiled", lambda *a, **k: [])
         kw = dict(sample_fps=5.0, plate_model_path=None, tile_px=9999, track_downscale=1,
                   track_lk_win=15, track_lk_levels=2)  # fmt: skip
@@ -231,6 +232,8 @@ class TestDetectParity:
         assert any(sampled for _, sampled in out["cv2"][1])
 
     def test_decode_backend_is_logged(self, h264_clip, monkeypatch, caplog):
+        # No real model: CI has neither the face ONNX nor the centerface extra.
+        monkeypatch.setattr(detect, "build_detectors", lambda *a, **k: (None, None))
         monkeypatch.setattr(detect, "detect_tiled", lambda *a, **k: [])
         with caplog.at_level(logging.INFO, logger="redactcam.detect"):
             detect.detect_and_track(
