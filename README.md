@@ -316,6 +316,20 @@ produced it, so for those runs the receipt identifies the code that built the ma
 and render, not necessarily the code that detected. Use `--fresh` when the
 detection identity matters.
 
+### Decode backend (NVDEC)
+
+Stage 1 reads every frame and is decode-bound on 4K HEVC. `detect_and_track` /
+`detect_regions` take `decode="auto"|"cv2"|"nvdec"`; the environment variable
+`REDACTCAM_DECODE=cv2|nvdec|auto` overrides it. `nvdec` runs
+`ffmpeg -hwaccel cuda -c:v <codec>_cuvid ... -pix_fmt bgr24` through a pipe (measured
+on a 4K60 HEVC clip: cv2 23 fps, CPU ffmpeg 22 fps, NVDEC 40 fps). `auto` uses it only
+when ffmpeg reports `cuda`, has the `hevc_cuvid`/`h264_cuvid`/`av1_cuvid` decoder for
+the stream, and decodes one probe frame; otherwise it logs why at INFO and uses cv2.
+Clips with rotation metadata, other codecs and checkpoint resumes use cv2. Frame
+indices, sampling and tracking are identical for both. A decoder that dies or ends
+early mid-clip raises `FrameSourceError` rather than truncating the video. The
+detection log shows `detect: decode=nvdec`.
+
 ### Python
 
 ```python

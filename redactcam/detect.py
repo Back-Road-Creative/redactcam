@@ -24,6 +24,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .frames import iter_frames
+
 logger = logging.getLogger(__name__)
 
 
@@ -663,6 +665,7 @@ def detect_regions(
     plate_max_aspect: float = 6.0,
     plate_max_area_frac: float = 0.01,
     plate_threads: int = 0,
+    decode: str = "auto",
 ) -> list[FrameRegions]:
     """Detect face ∪ plate regions across a video, one ``FrameRegions`` per
     sampled frame (empty ``boxes`` is normal for clean frames).
@@ -699,7 +702,8 @@ def detect_regions(
         plate_threads,
     )
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    meta, frames = iter_frames(path, decode=decode, capture=cap)
+    fps = meta.fps
     # Native frames to advance between samples; fall back to every frame when
     # fps is zero/garbage (some containers report 0).
     step = max(1, round(fps / sample_fps)) if fps > 0 and sample_fps > 0 else 1
@@ -708,10 +712,7 @@ def detect_regions(
     frame_idx = 0
     tiles: list[tuple[int, int, int, int]] | None = None
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        for frame in frames:
             if frame_idx % step == 0:
                 if tiles is None:  # frame size is constant — derive the grid once
                     tiles = frame_tiles(frame.shape[1], frame.shape[0], tile_px, tile_overlap)
@@ -729,6 +730,7 @@ def detect_regions(
                 )
             frame_idx += 1
     finally:
+        frames.close()
         cap.release()
 
     return results
@@ -886,6 +888,7 @@ def detect_and_track(
     checkpoint_every_frames: int = 0,
     checkpoint_overlap_frames: int = CHECKPOINT_OVERLAP_FRAMES,
     progress_every_s: float = 60.0,
+    decode: str = "auto",
 ) -> tuple[dict[int, list[Box]], int, int, int]:
     """One decode pass producing DENSE per-frame privacy boxes.
 
@@ -996,6 +999,11 @@ def detect_and_track(
     ``detect: done`` line, so a multi-hour pass is distinguishable from a hung one. TOTAL
     and P are omitted when the container reports no frame count. Logging only; the
     returned boxes are unchanged.
+
+    ``decode`` (``auto`` | ``cv2`` | ``nvdec``; env ``REDACTCAM_DECODE`` wins) picks the
+    frame source, see ``redactcam.frames``. Frame indices, sampling and tracking are
+    identical for every backend; the chosen one is logged as ``detect: decode=<name>``
+    and repeated on the ``detect: done`` line (both only while progress logging is on). A checkpoint resume decodes with cv2.
     """
     from .track import TrackManager
 
@@ -1054,14 +1062,16 @@ def detect_and_track(
         if restored is not None:
             resumed, frames_done = restored
             frame_idx = max(0, frames_done - max(0, checkpoint_overlap_frames))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             logger.info(
                 "Resuming detection at frame %d (%d frames checkpointed)",
                 frame_idx,
                 frames_done,
             )
     last_checkpoint = frame_idx
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    meta, frames = iter_frames(path, decode=decode, start_frame=frame_idx, capture=cap)
+    total_frames = meta.frame_count
+    if progress_every_s > 0:
+        logger.info("detect: decode=%s", meta.backend)
     t_start = last_progress = time.monotonic()
     progress_start_idx = last_progress_idx = frame_idx
     # Adaptive plate cadence: between sparse samples a plate accelerating through a
@@ -1072,10 +1082,7 @@ def detect_and_track(
     # self-clears when the plate retires (``max_speed`` → 0).
     boost_run = 0
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        for frame in frames:
             if tracker is None:  # geometry is constant — build the grid + tracker once
                 h, w = frame.shape[:2]
                 tiles = frame_tiles(w, h, tile_px, tile_overlap)
@@ -1205,6 +1212,7 @@ def detect_and_track(
                 )
                 last_checkpoint = frame_idx
     finally:
+        frames.close()
         cap.release()
 
     # Temporal confirmation drops unconfirmed FACE tracks (one-detection foliage/
@@ -1223,8 +1231,9 @@ def detect_and_track(
         frame_boxes = _union_boxes(resumed, frame_boxes)
     if progress_every_s > 0:
         logger.info(
-            "detect: done, %d frames in %.0fs",
+            "detect: done, %d frames in %.0fs, decode=%s",
             frame_idx - progress_start_idx,
             time.monotonic() - t_start,
+            meta.backend,
         )
     return frame_boxes, frame_idx, n_face, n_plate
