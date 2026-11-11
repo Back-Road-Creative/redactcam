@@ -1018,3 +1018,148 @@ class TestDetectionProgressHeartbeat:
             detect_and_track(video, progress_every_s=5.0, **self.KW)
         lines = [m for m in self._progress(caplog) if m.startswith("detect: frame ")]
         assert lines and all("%" not in m and "/" not in m for m in lines), lines
+
+
+class _CountingSession(_FakeSession):
+    """``_FakeSession`` that tallies ``run`` calls into a shared counter."""
+
+    def __init__(self, output, counter):
+        super().__init__(output)
+        self._counter = counter
+
+    def run(self, names, feed):
+        self._counter["runs"] += 1
+        return super().run(names, feed)
+
+
+class TestFrameMemo:
+    """One frame's letterbox blobs and raw model outputs are computed once and shared.
+    Face and plate letterbox the same tiles to the same size; vehicle and person are
+    the same COCO model, so a 4K frame used to resize every tile twice and run the
+    COCO model twice. Sharing must leave every detector's boxes unchanged."""
+
+    FRAME = np.zeros((1280, 2560, 3), dtype=np.uint8)
+    TILES = frame_tiles(2560, 1280, 1280, 0.15)
+
+    @staticmethod
+    def _single(anchor):
+        arr = np.zeros((1, 5, 8), dtype=np.float32)
+        arr[0, 4, :] = 0.01
+        arr[0, :, 0] = anchor
+        return arr
+
+    @staticmethod
+    def _coco():
+        # 3 classes: person (0), bicycle (1), car (2). Anchor 0 a person, anchor 1 a car.
+        arr = np.zeros((1, 7, 8), dtype=np.float32)
+        arr[0, :, 0] = [100.0, 300.0, 40.0, 120.0, 0.9, 0.0, 0.0]
+        arr[0, :, 1] = [400.0, 300.0, 160.0, 90.0, 0.0, 0.0, 0.8]
+        return arr
+
+    def _det(self, output, counter, model_id, class_filter=None):
+        det = _plate_detector(output, class_filter=class_filter)
+        det._sess = _CountingSession(output, counter)
+        det._model_id = model_id
+        return det
+
+    def test_face_and_plate_letterbox_each_tile_once(self, monkeypatch):
+        calls = {"n": 0}
+        real = detect.letterbox
+
+        def counting(img, size):
+            calls["n"] += 1
+            return real(img, size)
+
+        monkeypatch.setattr(detect, "letterbox", counting)
+        counter = {"runs": 0}
+        face = self._det(self._single([320.0, 320.0, 40.0, 40.0, 0.9]), counter, "face")
+        plate = self._det(self._single([175.0, 347.5, 50.0, 15.0, 0.9]), counter, "plate")
+        want = (
+            detect_tiled(self.FRAME, face, 0.4, self.TILES),
+            detect_tiled(self.FRAME, plate, 0.4, self.TILES),
+        )
+        calls["n"] = 0
+        memo = detect.FrameMemo()
+        got = (
+            detect_tiled(self.FRAME, face, 0.4, self.TILES, memo),
+            detect_tiled(self.FRAME, plate, 0.4, self.TILES, memo),
+        )
+        assert got == want and want[0] and want[1]
+        assert calls["n"] == len(self.TILES) > 1
+
+    def test_same_model_runs_once_and_each_keeps_its_classes(self):
+        counter = {"runs": 0}
+        veh = self._det(self._coco(), counter, "coco", class_filter=frozenset({2}))
+        per = self._det(self._coco(), counter, "coco", class_filter=frozenset({0}))
+        want = (veh.detect(self.FRAME, 0.35), per.detect(self.FRAME, 0.35))
+        counter["runs"] = 0
+        memo = detect.FrameMemo()
+        got = (
+            detect.detect_shared(veh, self.FRAME, 0.35, memo),
+            detect.detect_shared(per, self.FRAME, 0.35, memo),
+        )
+        assert got == want and want[0] and want[1] and want[0] != want[1]
+        assert counter["runs"] == 1
+
+    def test_different_models_never_share_an_output(self):
+        counter = {"runs": 0}
+        a = self._det(self._coco(), counter, "a", class_filter=frozenset({2}))
+        b = self._det(self._coco(), counter, "b", class_filter=frozenset({0}))
+        memo = detect.FrameMemo()
+        detect.detect_shared(a, self.FRAME, 0.35, memo)
+        detect.detect_shared(b, self.FRAME, 0.35, memo)
+        assert counter["runs"] == 2
+
+    def test_a_detector_without_a_model_id_never_shares(self):
+        """A detector built without ``_model_id`` (an older pickle, a stand-in) keys
+        on itself, so two such detectors never borrow each other's output."""
+        counter = {"runs": 0}
+        a = self._det(self._coco(), counter, None, class_filter=frozenset({2}))
+        b = self._det(self._coco(), counter, None, class_filter=frozenset({0}))
+        memo = detect.FrameMemo()
+        detect.detect_shared(a, self.FRAME, 0.35, memo)
+        detect.detect_shared(b, self.FRAME, 0.35, memo)
+        assert counter["runs"] == 2
+
+    def test_plain_detectors_still_work_with_a_memo(self):
+        """Stand-ins with only ``detect(frame, conf)`` (CenterFace, test fakes) are
+        called the old way; the memo is simply not used for them."""
+        memo = detect.FrameMemo()
+        assert detect_tiled(self.FRAME, _PatchFinder(), 0.4, self.TILES, memo) == []
+        assert detect.detect_shared(_PatchFinder(), self.FRAME, 0.4, memo) == []
+
+    def test_model_id_is_the_file_content(self, tmp_path):
+        a, b, c = tmp_path / "vehicle.onnx", tmp_path / "person.onnx", tmp_path / "face.onnx"
+        a.write_bytes(b"coco")
+        b.write_bytes(b"coco")
+        c.write_bytes(b"face")
+        assert detect._model_id(a) == detect._model_id(b) != detect._model_id(c)
+
+    def test_detect_and_track_runs_a_shared_coco_model_once_per_frame(
+        self, tmp_path, monkeypatch
+    ):
+        counter = {"runs": 0}
+        monkeypatch.setattr(
+            detect,
+            "build_vehicle_detector",
+            lambda *a, **k: self._det(self._coco(), counter, "coco", frozenset({2})),
+        )
+        monkeypatch.setattr(
+            detect,
+            "build_person_detector",
+            lambda *a, **k: self._det(self._coco(), counter, "coco", frozenset({0})),
+        )
+        video = _make_moving_video(tmp_path)
+        kw = dict(sample_fps=3.0, plate_model_path=None, tile_px=9999, track_downscale=1)
+        detect_and_track(video, track_cabin_frac=0.5, vehicle_model_path="x", **kw)
+        vehicle_only = counter["runs"]
+        counter["runs"] = 0
+        detect_and_track(
+            video,
+            track_cabin_frac=0.5,
+            vehicle_model_path="x",
+            track_person=True,
+            person_model_path="x",
+            **kw,
+        )
+        assert vehicle_only > 0 and counter["runs"] == vehicle_only
