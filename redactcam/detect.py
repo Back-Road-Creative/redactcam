@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from .frames import iter_frames
+from .models import _sha256
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +193,41 @@ def frame_tiles(w: int, h: int, tile_px: int, overlap: float) -> list[tuple[int,
     ]
 
 
-def detect_tiled(frame: np.ndarray, detector, conf: float, tiles) -> list[Box]:
+class FrameMemo:
+    """Scratch shared by every detector looking at ONE frame; build a new one per frame.
+
+    Face and plate letterbox the same tiles to the same size, and the vehicle and
+    person detectors are normally the same COCO model, so without it a 4K frame
+    resized each tile twice and ran the COCO model twice. Measured on a 4K drive
+    (2026-11-11): letterbox resizes took as long as every ONNX run combined. Blobs key
+    on (crop, infer size); raw outputs also on the model's content hash, so only a
+    byte-identical model reuses one."""
+
+    def __init__(self) -> None:
+        self.blobs: dict = {}
+        self.preds: dict = {}
+
+
+def detect_shared(detector, img: np.ndarray, conf: float, memo: FrameMemo | None, crop=None):
+    """``detector.detect(img, conf)``, reusing ``memo`` when the detector supports it.
+    ``crop`` names where ``img`` sits in the frame (None = the whole frame). Stand-ins
+    with only ``detect(frame, conf)`` (CenterFace, test fakes) are called as before."""
+    shared = getattr(detector, "detect_memo", None) if memo is not None else None
+    if shared is None:
+        return detector.detect(img, conf)
+    return shared(img, conf, memo, crop)
+
+
+def detect_tiled(
+    frame: np.ndarray, detector, conf: float, tiles, memo: FrameMemo | None = None
+) -> list[Box]:
     """Run ``detector`` over each tile, merge boxes into full-frame coords, dedupe."""
     if len(tiles) == 1:
-        return detector.detect(frame, conf)
+        return detect_shared(detector, frame, conf, memo)
     merged: list[Box] = []
     for x0, y0, x1, y1 in tiles:
-        for bx, by, bw, bh in detector.detect(frame[y0:y1, x0:x1], conf):
+        tile = frame[y0:y1, x0:x1]
+        for bx, by, bw, bh in detect_shared(detector, tile, conf, memo, (x0, y0, x1, y1)):
             merged.append((x0 + bx, y0 + by, bw, bh))
     return dedupe(merged)
 
@@ -354,6 +383,7 @@ class YoloDetector:
         sess_providers = list(self._sess.get_providers())
         _assert_session_on_gpu(sess_providers, gpu_expected=gpu_expected)
         logger.info("%s on %s", Path(model_path).name, sess_providers[0])
+        self._model_id = _model_id(Path(model_path))
         self._input_name = self._sess.get_inputs()[0].name
         self._infer_size = infer_size
         self._iou = iou
@@ -373,18 +403,43 @@ class YoloDetector:
         elongated shoreline/railing structures above). Deliberately forgiving — an
         unrecognised output tensor yields no boxes rather than a crash, so one
         malformed model does not take down the whole run."""
-        h0, w0 = frame_bgr.shape[:2]
+        prep = self._prepare(frame_bgr)
+        return self._decode(self._infer(prep[0]), prep, frame_bgr.shape, conf)
+
+    def detect_memo(self, frame_bgr: np.ndarray, conf: float, memo: FrameMemo, crop) -> list[Box]:
+        """``detect`` with the letterbox blob and raw output taken from ``memo`` when
+        another detector already computed them for this crop (see ``FrameMemo``).
+        A detector without a model id keys its output on itself, never sharing it."""
+        bkey = (crop, self._infer_size)
+        prep = memo.blobs.get(bkey)
+        if prep is None:
+            prep = memo.blobs[bkey] = self._prepare(frame_bgr)
+        pkey = (getattr(self, "_model_id", None) or id(self), crop, self._infer_size)
+        if pkey not in memo.preds:
+            memo.preds[pkey] = self._infer(prep[0])
+        return self._decode(memo.preds[pkey], prep, frame_bgr.shape, conf)
+
+    def _prepare(self, frame_bgr: np.ndarray):
+        """Letterboxed NCHW float blob plus ``(scale, pad_x, pad_y)``."""
         canvas, scale, pad_x, pad_y = letterbox(frame_bgr, self._infer_size)
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]  # NCHW
+        return blob, scale, pad_x, pad_y
 
+    def _infer(self, blob: np.ndarray):
+        """Raw first output, or None when inference failed (the frame yields no boxes)."""
         try:
-            outputs = self._sess.run(None, {self._input_name: blob})
+            return self._sess.run(None, {self._input_name: blob})[0]
         except Exception as exc:  # pragma: no cover - model-shape dependent
             logger.warning("YOLO inference failed: %s — skipping this frame", exc)
-            return []
+            return None
 
-        preds = np.asarray(outputs[0])
+    def _decode(self, output, prep, shape, conf: float) -> list[Box]:
+        if output is None:
+            return []
+        _, scale, pad_x, pad_y = prep
+        h0, w0 = shape[:2]
+        preds = np.asarray(output)
         if preds.ndim == 3:
             preds = preds[0]
         if preds.ndim != 2:
@@ -445,6 +500,12 @@ class YoloDetector:
             if box is not None:
                 result.append(box)
         return result
+
+
+def _model_id(path: Path) -> str:
+    """Content hash of a model file: the vehicle and person specs resolve to two
+    files holding the same COCO model, which only their bytes reveal."""
+    return _sha256(path)
 
 
 def build_detectors(
@@ -575,6 +636,7 @@ def detect_plates(
     conf: float,
     tiles,
     plate_max_area_frac: float = 0.0,
+    memo: FrameMemo | None = None,
 ) -> list[Box]:
     """Tiled plate detection on one frame + the oversized-plate area gate. A plate
     box covering more than ``plate_max_area_frac`` of the FULL frame is dropped:
@@ -585,7 +647,7 @@ def detect_plates(
     plate cadence) can re-detect plates without re-running face detection."""
     if not plate_detector:
         return []
-    plates = detect_tiled(frame, plate_detector, conf, tiles)
+    plates = detect_tiled(frame, plate_detector, conf, tiles, memo)
     if plate_max_area_frac > 0 and plates:
         limit = plate_max_area_frac * frame.shape[0] * frame.shape[1]
         plates = [b for b in plates if b[2] * b[3] <= limit]
@@ -607,8 +669,9 @@ def detect_frame(
     plate band needs 0.4), so face recall is pushed without lowering the plate
     threshold (which would resurface squarish road-sign FPs). Faces are never
     area-gated."""
-    faces = detect_tiled(frame, face_detector, face_conf, tiles)
-    plates = detect_plates(frame, plate_detector, plate_conf, tiles, plate_max_area_frac)
+    memo = FrameMemo()
+    faces = detect_tiled(frame, face_detector, face_conf, tiles, memo)
+    plates = detect_plates(frame, plate_detector, plate_conf, tiles, plate_max_area_frac, memo)
     return faces, plates
 
 
@@ -1138,12 +1201,19 @@ def detect_and_track(
             vehicles: list[Box] = []
             persons: list[Box] = []
             if do_face or do_plate or do_vehicle or do_person:
-                faces = detect_tiled(frame, face_detector, eff_face_conf, tiles) if do_face else []
+                memo = FrameMemo()
+                faces = (
+                    detect_tiled(frame, face_detector, eff_face_conf, tiles, memo)
+                    if do_face
+                    else []
+                )
                 if do_plate:
-                    plates = detect_plates(frame, plate_detector, conf, tiles, plate_max_area_frac)
+                    plates = detect_plates(
+                        frame, plate_detector, conf, tiles, plate_max_area_frac, memo
+                    )
                 if do_vehicle:
                     vehicles = filter_vehicles(
-                        vehicle_detector.detect(frame, vehicle_conf),
+                        detect_shared(vehicle_detector, frame, vehicle_conf, memo),
                         frame.shape[0],
                         vehicle_min_height_frac,
                         vehicle_ignore_bottom_frac,
@@ -1152,7 +1222,7 @@ def detect_and_track(
                     # Height gate only (drop tiny distant dots); a person can legitimately
                     # sit in the bottom strip, so no ignore-bottom exclusion.
                     persons = filter_vehicles(
-                        person_detector.detect(frame, person_conf),
+                        detect_shared(person_detector, frame, person_conf, memo),
                         frame.shape[0],
                         person_min_height_frac,
                         0.0,
