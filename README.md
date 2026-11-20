@@ -337,6 +337,12 @@ in length. A decoder that dies or ends early mid-clip raises `FrameSourceError` 
 than truncating the video. The
 detection log shows `detect: decode=nvdec`.
 
+**Mask render cost.** The mask clip is rendered cheaply but identically: frames with no
+boxes are written as a shared black frame, the feather blur runs only on the boxes'
+bounding region (plus one kernel radius of context, so no mask pixel changes), and the
+lossless FFV1 encode is slice-threaded. The decoded mask is byte-identical to a
+whole-frame render; `tests/test_mask_perf.py` proves it against the old code.
+
 ### Python
 
 ```python
