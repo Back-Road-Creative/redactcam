@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **Cheaper mask render, identical output.** `materialize_mask_video` writes a shared
+  all-black frame for every frame with no boxes (no blur, no per-frame allocation),
+  `render_mask_frame` runs the feather Gaussian only on the boxes' bounding region plus
+  one kernel radius of context instead of the whole frame, and the FFV1 encode is
+  slice-threaded (`-slices 4 -threads 4`, `mask.FFV1_SLICES`). The decoded mask is
+  byte-identical to the previous render (`tests/test_mask_perf.py` compares both against a
+  verbatim copy of the old code, including edge-touching, overlapping and off-frame
+  boxes). Box size, dilation and hold logic are untouched.
+
 ### Fixed
 
 - **One frame-index contract; fail closed on count mismatch.** The NVDEC pipe now runs
