@@ -28,6 +28,35 @@ logger = logging.getLogger(__name__)
 #: encoder accepts for the frame size; ffmpeg rejects an invalid count at open.
 FFV1_SLICES = 4
 
+#: Smallest blur crop, in rows and columns, unless the frame itself is smaller.
+#: OpenCV 4.13's multithreaded GaussianBlur returns pixels BELOW the true value on
+#: images 6-17 rows tall with a 5x5 kernel (feather 2): an all-255 strip came back
+#: as low as 239. A full-frame blur never hit that range; a box-region crop would,
+#: so the crop grows (with real frame data, which keeps it exact) to this size.
+MIN_BLUR_CROP = 32
+
+#: Below this frame side ffmpeg rejects the slice layout ("Unsupported number 4 of
+#: slices"), so the encode runs single-slice there.
+FFV1_MIN_SIDE = 8
+
+
+def ffv1_threading_args(width: int, height: int) -> list[str]:
+    """Slice-threading args for the FFV1 mask encode, or none for a tiny frame."""
+    if min(width, height) < FFV1_MIN_SIDE:
+        return []
+    return ["-slices", str(FFV1_SLICES), "-threads", str(FFV1_SLICES)]
+
+
+def _grow_span(lo: int, hi: int, limit: int, minimum: int) -> tuple[int, int]:
+    """Widen [lo, hi) inside [0, limit) to at least ``minimum`` (or ``limit``)."""
+    need = min(minimum, limit) - (hi - lo)
+    if need <= 0:
+        return lo, hi
+    lo = max(0, lo - (need + 1) // 2)
+    hi = min(limit, lo + max(hi - lo, min(minimum, limit)))
+    lo = max(0, hi - max(hi - lo, min(minimum, limit)))
+    return lo, hi
+
 
 def active_boxes_at(timeline: BlurTimeline, frame_idx: int) -> list[Box]:
     """Boxes active at source ``frame_idx`` — an O(1) lookup into the dense
@@ -52,11 +81,14 @@ def render_mask_frame(width: int, height: int, boxes: list[Box], feather_px: int
     frame = np.zeros((height, width), dtype=np.uint8)
     if not boxes:
         return frame
-    # cv2.rectangle fills x..x+w and y..y+h INCLUSIVE, so the covered span is w+1.
-    bx0 = min(x for x, _, _, _ in boxes)
-    by0 = min(y for _, y, _, _ in boxes)
-    bx1 = max(x + w for x, _, w, _ in boxes)
-    by1 = max(y + h for _, y, _, h in boxes)
+    # Plain ints: an unsigned numpy coordinate would wrap on ``x - feather_px``.
+    boxes = [(int(x), int(y), int(w), int(h)) for x, y, w, h in boxes]
+    # cv2.rectangle fills between its two corners INCLUSIVE whichever way round they
+    # are, so a negative w/h covers x+w..x; the union takes both ends of every box.
+    bx0 = min(min(x, x + w) for x, _, w, _ in boxes)
+    by0 = min(min(y, y + h) for _, y, _, h in boxes)
+    bx1 = max(max(x, x + w) for x, _, w, _ in boxes)
+    by1 = max(max(y, y + h) for _, y, _, h in boxes)
     if feather_px <= 0:
         for x, y, w, h in boxes:
             cv2.rectangle(frame, (x, y), (x + w, y + h), 255, thickness=-1)
@@ -69,6 +101,8 @@ def render_mask_frame(width: int, height: int, boxes: list[Box], feather_px: int
     # Input crop: the output region plus one more kernel radius of context.
     cx0, cy0 = max(0, ox0 - feather_px), max(0, oy0 - feather_px)
     cx1, cy1 = min(width, ox1 + feather_px), min(height, oy1 + feather_px)
+    cx0, cx1 = _grow_span(cx0, cx1, width, MIN_BLUR_CROP)
+    cy0, cy1 = _grow_span(cy0, cy1, height, MIN_BLUR_CROP)
     crop = np.zeros((cy1 - cy0, cx1 - cx0), dtype=np.uint8)
     for x, y, w, h in boxes:
         cv2.rectangle(crop, (x - cx0, y - cy0), (x + w - cx0, y + h - cy0), 255, thickness=-1)
@@ -156,10 +190,7 @@ def materialize_mask_video(
         "ffv1",
         # Slice-threaded encode. FFV1 is lossless, so the slice layout changes the
         # bitstream but never a decoded pixel (test_mask_perf.py compares decoded frames).
-        "-slices",
-        str(FFV1_SLICES),
-        "-threads",
-        str(FFV1_SLICES),
+        *ffv1_threading_args(w, h),
         "-pix_fmt",
         "gray",
         str(output_path),
