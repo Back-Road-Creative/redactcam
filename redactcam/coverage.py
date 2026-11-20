@@ -36,6 +36,7 @@ from .detect import (
     filter_vehicles,
     frame_tiles,
 )
+from .frames import FrameSourceError
 
 
 @dataclass
@@ -277,13 +278,27 @@ def verify_cabin_coverage(
     while True:
         # Every frame of both is grabbed, so the two stay frame-locked; only the
         # sampled ones are retrieved, which skips converting and copying the rest.
-        if not (cap_in.grab() and cap_m.grab()):
+        got_in, got_m = cap_in.grab(), cap_m.grab()
+        if got_in != got_m:
+            cap_in.release()
+            cap_m.release()
+            raise FrameSourceError(
+                f"source and mask videos differ in length: the {'mask' if got_in else 'source'} "
+                f"ended at frame {idx} while the other continued; refusing to verify "
+                "misaligned streams"
+            )
+        if not got_in:
             break
         if idx % step == 0:
             ok_i, frame = cap_in.retrieve()
             ok_m, mask = cap_m.retrieve()
             if not (ok_i and ok_m):
-                break
+                cap_in.release()
+                cap_m.release()
+                raise FrameSourceError(
+                    f"could not read frame {idx} of the {'source' if not ok_i else 'mask'}; "
+                    "refusing to verify a partial pass"
+                )
             h, w = frame.shape[:2]
             if tiles is None:
                 tiles = frame_tiles(w, h, 1280, 0.15)

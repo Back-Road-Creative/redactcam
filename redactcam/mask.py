@@ -73,14 +73,32 @@ def _count_frames(path: Path) -> int:
         return -1
 
 
-def materialize_mask_video(timeline: BlurTimeline, output_path: Path, feather_px: int = 8) -> Path:
+def materialize_mask_video(
+    timeline: BlurTimeline,
+    output_path: Path,
+    feather_px: int = 8,
+    container_frame_count: int | None = None,
+) -> Path:
     """Render ``timeline`` to a lossless gray FFV1 mask at the source's exact
     resolution / fps / frame count. Hard-fails if the written frame count does
-    not equal ``source_frame_count`` (a misaligned mask blurs the wrong pixels)."""
+    not equal ``source_frame_count`` (a misaligned mask blurs the wrong pixels).
+
+    The mask stamps frame ``j`` at ``j / fps``, so it lines up with the picture only
+    when the source has exactly ``n`` frames. ``container_frame_count`` (the source
+    container's own count) is asserted equal to ``n`` before anything is rendered."""
     w, h, n = timeline.frame_width, timeline.frame_height, timeline.source_frame_count
     fps = timeline.source_fps or 30.0
     if w <= 0 or h <= 0 or n <= 0:
         raise ValueError(f"mask needs positive geometry/length; got {w}x{h}, {n} frames")
+    if (
+        container_frame_count is not None
+        and container_frame_count > 0
+        and container_frame_count != n
+    ):
+        raise RuntimeError(
+            f"timeline has {n} frames but the source container has {container_frame_count}; "
+            "a mask in a different index space blurs the wrong pixels; refusing to proceed"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg",

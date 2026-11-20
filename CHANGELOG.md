@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **One frame-index contract; fail closed on count mismatch.** The NVDEC pipe now runs
+  with `-fps_mode passthrough`; without it a rawvideo muxer duplicated frames across
+  timestamp gaps (306,385 frames against a container's 306,377 on a real day concat), so
+  detection and the mask lived in a longer index space than the picture and the blur
+  drifted off it. `iter_frames` raises `FrameSourceError` unless the delivered count
+  equals the container's (stricter than the old 1% shortfall tolerance, and now also
+  catches overshoot). A checkpoint resume no longer switches NVDEC to cv2: it decodes from
+  frame 0 and skips. `materialize_mask_video(container_frame_count=)` (wired from
+  `redact_video`) refuses a timeline of a different length, and `verify_cabin_coverage`
+  raises instead of stopping silently when the source or mask video ends first.
+
 ### Added
 
 - **NVDEC frame source.** `redactcam.frames.iter_frames` feeds `detect_and_track` and

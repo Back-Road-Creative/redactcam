@@ -168,10 +168,12 @@ class TestSelection:
         assert frames.is_rotated({"tags": {"rotate": "90"}})
         assert not frames.is_rotated({"tags": {}, "side_data_list": []})
 
-    def test_resume_start_uses_cv2(self, h264_clip):
+    def test_resume_start_keeps_the_fresh_pass_backend(self, h264_clip):
+        fresh, it = iter_frames(h264_clip, decode="auto")
+        it.close()
         meta, it = iter_frames(h264_clip, decode="auto", start_frame=10)
         with closing(it):
-            assert meta.backend == "cv2" and len(list(it)) == 20
+            assert meta.backend == fresh.backend and len(list(it)) == 20
 
 
 class _FakeProc:
