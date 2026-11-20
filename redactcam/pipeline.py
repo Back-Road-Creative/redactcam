@@ -164,8 +164,9 @@ def redact_video(
         _timeline.write_sidecar(sidecar_path, tl)
 
     mask_path = _mask.materialize_mask_video(
-        tl, work / f"{stem}_redactcam_mask.mkv", feather_px=feather_px
-    )
+        tl, work / f"{stem}_redactcam_mask.mkv", feather_px=feather_px,
+        container_frame_count=probe_count,
+    )  # fmt: skip
 
     report = None
     if verify and paths.get("vehicle"):

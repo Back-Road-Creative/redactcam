@@ -12,6 +12,13 @@ NVDEC only when ffmpeg reports ``-hwaccel cuda``, has the matching ``*_cuvid``
 decoder, and decodes one frame of the input; anything else uses ``cv2``. A rotated
 clip (display-matrix / rotate tag) always uses ``cv2``, which applies the rotation
 the raw pipe would not.
+
+Frame-index contract: index ``i`` is the container's ``i``-th decoded frame in every
+stage. The NVDEC pipe runs with passthrough timing (a rawvideo muxer otherwise
+duplicates frames across timestamp gaps and the indices drift off the picture), and
+a pass that delivers a different number of frames than the container reports raises
+``FrameSourceError``. A checkpoint resume stays on the decoder of a fresh pass: NVDEC
+decodes from frame 0 and discards frames below ``start_frame``.
 """
 
 from __future__ import annotations
@@ -37,9 +44,6 @@ DECODE_MODES = ("auto", "cv2", "nvdec")
 _CUVID = {"hevc": "hevc_cuvid", "h264": "h264_cuvid", "av1": "av1_cuvid"}
 _PROBE_TIMEOUT_S = 60
 _WAIT_TIMEOUT_S = 10
-# A clean ffmpeg exit with fewer frames than the container promised is tolerated up
-# to this fraction (container frame counts are estimates); more is a truncated read.
-_SHORTFALL_FRAC = 0.01
 
 
 @dataclass(frozen=True)
@@ -144,10 +148,25 @@ def is_rotated(stream: dict) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=4)
+def _timing_flag(ffmpeg: str) -> tuple[str, ...]:
+    """Passthrough timing: ``-fps_mode passthrough``, or ``-vsync passthrough`` on an
+    ffmpeg that predates ``-fps_mode``."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-h", "full"],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+        )  # fmt: skip
+        has_fps_mode = "-fps_mode" in r.stdout
+    except (OSError, subprocess.SubprocessError):
+        has_fps_mode = True
+    return ("-fps_mode" if has_fps_mode else "-vsync", "passthrough")
+
+
 def _nvdec_command(ffmpeg: str, decoder: str, path: Path) -> list[str]:
     return [
         ffmpeg, "-v", "error", "-hwaccel", "cuda", "-c:v", decoder,
-        "-i", str(path), "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+        "-i", str(path), *_timing_flag(ffmpeg), "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
     ]  # fmt: skip
 
 
@@ -185,10 +204,12 @@ def _nvdec_plan(path: Path, meta: FrameMeta) -> tuple[str, str] | str:
     return ffmpeg, decoder
 
 
-def _open_nvdec(cmd: list[str], meta: FrameMeta) -> Iterator[np.ndarray]:
+def _open_nvdec(cmd: list[str], meta: FrameMeta, skip: int = 0) -> Iterator[np.ndarray]:
     """Start the pipe and read frame 0 eagerly so a dead start falls back to cv2.
 
-    Raises ``FrameSourceError`` if it cannot start or yields no first frame."""
+    The pipe always starts at frame 0; the first ``skip`` frames are decoded and
+    discarded so a resume keeps the fresh pass's indices. Raises ``FrameSourceError``
+    if it cannot start or yields no first frame."""
     size = meta.width * meta.height * 3
     err = tempfile.TemporaryFile()
     try:
@@ -207,22 +228,24 @@ def _open_nvdec(cmd: list[str], meta: FrameMeta) -> Iterator[np.ndarray]:
         raise FrameSourceError(f"nvdec pipe produced no frame: {msg}")
 
     def gen() -> Iterator[np.ndarray]:
-        delivered = 0
+        delivered = 0  # every frame read from the pipe, including skipped ones
         shape = (meta.height, meta.width, 3)
         buf: bytearray | None = first
         try:
             while buf is not None:
-                yield np.frombuffer(buf, dtype=np.uint8).reshape(shape)
                 delivered += 1
+                if delivered > skip:
+                    yield np.frombuffer(buf, dtype=np.uint8).reshape(shape)
                 buf = read_full(proc.stdout, size)
             rc = _reap(proc)
             if rc != 0:
                 raise FrameSourceError(
                     f"ffmpeg nvdec exited rc={rc} after {delivered} frames: {_stderr(err)}"
                 )
-            if meta.frame_count and delivered < meta.frame_count * (1 - _SHORTFALL_FRAC):
+            if meta.frame_count and delivered != meta.frame_count:
                 raise FrameSourceError(
-                    f"nvdec stream ended after {delivered} of {meta.frame_count} frames"
+                    f"nvdec stream delivered {delivered} frames but the container has "
+                    f"{meta.frame_count}; frame indices would not match the picture"
                 )
         finally:
             _reap(proc)
@@ -278,9 +301,9 @@ def iter_frames(
     """Open ``path`` and return ``(meta, frames)``; ``meta.backend`` names the decoder.
 
     Metadata always comes from ``cv2.VideoCapture`` (``capture`` lets the caller pass
-    one it already opened). ``start_frame`` > 0 (checkpoint resume) is served by cv2,
-    which can seek; NVDEC starts at frame 0. Close the iterator (``.close()`` /
-    ``contextlib.closing``) to stop ffmpeg and release the file."""
+    one it already opened). ``start_frame`` > 0 (checkpoint resume) stays on the
+    decoder of a fresh pass: cv2 seeks, NVDEC decodes from 0 and skips. Close the
+    iterator (``.close()`` / ``contextlib.closing``) to stop ffmpeg and release the file."""
     path = Path(path)
     mode = resolve_mode(decode)
     cap = capture if capture is not None else cv2.VideoCapture(str(path))
@@ -293,14 +316,14 @@ def iter_frames(
         frame_count=int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0),
     )
     if mode != "cv2":
-        reason = "resume from a checkpoint seeks with cv2" if start_frame > 0 else None
-        plan = reason or _nvdec_plan(path, meta)
+        plan = _nvdec_plan(path, meta)
         if isinstance(plan, tuple):
             ffmpeg, decoder = plan
             try:
                 frames = _open_nvdec(
                     _nvdec_command(ffmpeg, decoder, path),
                     FrameMeta(meta.fps, meta.width, meta.height, meta.frame_count, "nvdec"),
+                    skip=start_frame,
                 )
             except FrameSourceError as exc:
                 plan = str(exc)

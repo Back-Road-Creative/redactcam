@@ -325,9 +325,16 @@ Stage 1 reads every frame and is decode-bound on 4K HEVC. `detect_and_track` /
 on a 4K60 HEVC clip: cv2 23 fps, CPU ffmpeg 22 fps, NVDEC 40 fps). `auto` uses it only
 when ffmpeg reports `cuda`, has the `hevc_cuvid`/`h264_cuvid`/`av1_cuvid` decoder for
 the stream, and decodes one probe frame; otherwise it logs why at INFO and uses cv2.
-Clips with rotation metadata, other codecs and checkpoint resumes use cv2. Frame
-indices, sampling and tracking are identical for both. A decoder that dies or ends
-early mid-clip raises `FrameSourceError` rather than truncating the video. The
+Clips with rotation metadata and other codecs use cv2. Frame indices, sampling and
+tracking are identical for both: the NVDEC pipe runs with `-fps_mode passthrough`
+(`-vsync passthrough` on an ffmpeg without `-fps_mode`), so it never duplicates frames
+across a timestamp gap, and a pass whose delivered frame count differs from the
+container's raises `FrameSourceError`. A checkpoint resume stays on the decoder of a
+fresh pass (NVDEC decodes from frame 0 and discards frames below the resume point, cv2
+seeks). The mask writer refuses a timeline whose frame count differs from the source
+container's, and `verify_cabin_coverage` raises when the source and mask videos differ
+in length. A decoder that dies or ends early mid-clip raises `FrameSourceError` rather
+than truncating the video. The
 detection log shows `detect: decode=nvdec`.
 
 ### Python
