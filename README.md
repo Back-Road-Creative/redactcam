@@ -341,7 +341,10 @@ detection log shows `detect: decode=nvdec`.
 boxes are written as a shared black frame, the feather blur runs only on the boxes'
 bounding region (plus one kernel radius of context, so no mask pixel changes), and the
 lossless FFV1 encode is slice-threaded. The decoded mask is byte-identical to a
-whole-frame render; `tests/test_mask_perf.py` proves it against the old code.
+whole-frame render; `tests/test_mask_perf.py` proves it against the old code. The blur
+crop is never smaller than 32 rows or columns (unless the frame is): OpenCV 4.13's
+multithreaded blur lowers pixels on 6-17 row images, so `tests/test_mask_crop_floor.py`
+checks this at the default thread count.
 
 ### Python
 

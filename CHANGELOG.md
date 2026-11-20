@@ -19,6 +19,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Box-region mask blur can no longer lose mask pixels.** OpenCV 4.13's multithreaded
+  GaussianBlur returns values below the true result on 6-17 row images with a 5x5 kernel
+  (feather 2): box-core pixels dropped from 255 to 239. The blur crop now grows to at least
+  `mask.MIN_BLUR_CROP` (32) rows and columns with real frame data, which keeps it exact.
+  A box with negative width or height, or unsigned numpy coordinates, now renders as the
+  full-frame path does instead of vanishing, and frames under 8 px on a side encode
+  single-slice (`mask.ffv1_threading_args`). `tests/test_mask_crop_floor.py` runs at
+  OpenCV's default thread count.
+
 - **One frame-index contract; fail closed on count mismatch.** The NVDEC pipe now runs
   with `-fps_mode passthrough`; without it a rawvideo muxer duplicated frames across
   timestamp gaps (306,385 frames against a container's 306,377 on a real day concat), so
