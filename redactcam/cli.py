@@ -104,7 +104,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the installed code/native-runtime identity as JSON and exit",
     )
-    p.add_argument("--expect-version", metavar="X.Y.Z", help="exit 1 unless the installed version matches")
+    p.add_argument(
+        "--expect-version", metavar="X.Y.Z", help="exit 1 unless the installed version matches"
+    )
     p.add_argument(
         "--expect-code-sha256",
         metavar="HEX",
@@ -188,7 +190,9 @@ def _check_deps(
         print(f"opencv          {cv2.__version__}")
         print(f"onnxruntime     {ort.__version__}")
         print(f"providers       {', '.join(providers)}")
-        print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
+        print(
+            f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}"
+        )
         diag.update(opencv=cv2.__version__, onnxruntime=ort.__version__, providers=providers)
         # The provider LIST above is what the wheel advertises; this line is the
         # decision a detector makes from it — and it is where a GPU build that lost
@@ -267,7 +271,9 @@ def _models(pairs: list[str]) -> dict[str, ModelSpec]:
         if not path:
             raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
         if kind not in DEFAULT_MODELS:
-            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
+            raise SystemExit(
+                f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}"
+            )
         out[kind] = ModelSpec(name=kind, path=path)
     return out
 
@@ -285,9 +291,83 @@ def _print_coverage(report) -> None:
         print(f"{head} {name:<7} {state:<9} {detail}")
 
 
+def _explain_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="redactcam explain",
+        description=(
+            "Read-only: report every box the blur mask would cover, with its kind, cause and "
+            "detector class, using the same detection and tracking as a normal run. Writes "
+            "boxes.jsonl and summary.json (and sheet.png) to --out; never writes a mask or "
+            "touches the video."
+        ),
+    )
+    p.add_argument("input", type=Path, help="source video")
+    p.add_argument("--out", type=Path, required=True, help="directory for the report")
+    p.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        metavar="KIND=PATH",
+        help="local ONNX file instead of downloading, as for a normal run. Repeatable.",
+    )
+    p.add_argument(
+        "--sheet",
+        type=int,
+        default=0,
+        metavar="N",
+        help="also write N evenly spaced frames, boxes drawn, to sheet.png",
+    )
+    p.add_argument(
+        "--start",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help="analyse from this second (default 0)",
+    )
+    p.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="analyse this many seconds (default: to the end)",
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="log every stage")
+    return p
+
+
+def _explain(argv: list[str]) -> int:
+    from . import explain
+
+    args = _explain_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        summary = explain.explain_video(
+            args.input,
+            args.out,
+            models=_models(args.model),
+            sheet=args.sheet,
+            start_s=args.start,
+            duration_s=args.duration,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"redactcam: {exc}", file=sys.stderr)
+        return 1
+    print(f"boxes     {args.out / 'boxes.jsonl'} ({summary['boxes']} boxes)")
+    print(f"summary   {args.out / 'summary.json'} ({summary['frames_analysed']} frames)")
+    if args.sheet > 0:
+        print(f"sheet     {args.out / 'sheet.png'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw and raw[0] == "explain":
+        return _explain(raw[1:])
     parser = _parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

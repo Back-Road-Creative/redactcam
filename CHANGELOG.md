@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **`redactcam explain`**: a read-only diagnostic that reports every box the blur mask would
+  cover, per frame, with its kind, its cause (detected, interpolated, pre-roll, flow, coast)
+  and the detector's COCO class id for vehicles and people, plus a blurred-area summary, a
+  vehicle aspect histogram by class and an optional contact sheet. It runs the mask's own
+  detection and tracking, never writes a mask, and the mask output is unchanged (the COCO
+  class rides on a tuple subclass that compares and hashes as the plain box).
+
 ### Changed
 
 - **Cheaper mask render, identical output.** `materialize_mask_video` writes a shared

@@ -80,6 +80,25 @@ def file_hash(path: str | Path, block: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def detect_options(
+    models: dict[str, ModelSpec] | None = None,
+    cache_dir: Path | None = None,
+    detect_kwargs: dict | None = None,
+) -> tuple[dict, dict]:
+    """The exact ``detect_and_track`` keyword set a run uses -- the ``ROAD_FOOTAGE``
+    preset, ``detect_kwargs`` overrides and the resolved model paths -- plus those paths
+    by model kind. Shared by ``redact_video`` and ``redactcam explain`` so the two can
+    never drift apart."""
+    specs = {**DEFAULT_MODELS, **(models or {})}
+    paths = {k: resolve_model(v, cache_dir) for k, v in specs.items()}
+    opts = {**ROAD_FOOTAGE, **(detect_kwargs or {})}
+    opts["face_model_path"] = paths.get("face")
+    opts["plate_model_path"] = paths.get("plate")
+    opts["vehicle_model_path"] = paths.get("vehicle")
+    opts["person_model_path"] = paths.get("person")
+    return opts, paths
+
+
 def redact_video(
     source_video: str | Path,
     output_path: str | Path | None = None,
@@ -127,14 +146,7 @@ def redact_video(
     work.mkdir(parents=True, exist_ok=True)
     stem = source_video.stem
 
-    specs = {**DEFAULT_MODELS, **(models or {})}
-    paths = {k: resolve_model(v, cache_dir) for k, v in specs.items()}
-
-    opts = {**ROAD_FOOTAGE, **(detect_kwargs or {})}
-    opts["face_model_path"] = paths.get("face")
-    opts["plate_model_path"] = paths.get("plate")
-    opts["vehicle_model_path"] = paths.get("vehicle")
-    opts["person_model_path"] = paths.get("person")
+    opts, paths = detect_options(models, cache_dir, detect_kwargs)
 
     fps, probe_count, width, height = _timeline.probe_video(source_video)
     source_hash = file_hash(source_video)

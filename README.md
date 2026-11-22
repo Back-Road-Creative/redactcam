@@ -316,6 +316,34 @@ produced it, so for those runs the receipt identifies the code that built the ma
 and render, not necessarily the code that detected. Use `--fresh` when the
 detection identity matters.
 
+### Explain why the blur covers what it covers
+
+```
+redactcam explain clip.mp4 --out explain/ [--sheet 12] [--start 30 --duration 20] [--model KIND=PATH]
+```
+
+A read-only diagnostic for over-blur. It runs the same detection, tracking and
+dilation a normal run uses (the `ROAD_FOOTAGE` preset, `detect_and_track`, then
+`build_timeline`) and reports the exact boxes the mask would draw. It never writes a
+mask and never touches the video. In `--out`:
+
+- `boxes.jsonl`: one record per box per frame: `frame`, `kind` (`face`, `plate`,
+  `person`, `vehicle_cabin`), `source`, `coco_class`, `x y w h` (the dilated box the
+  mask uses), `raw` (before dilation), `vehicle_box` (the whole vehicle box a cabin
+  band was cut from), `aspect` (w/h), `area_frac` (of the frame), `track_id`.
+- `source` is `detected` (a detector hit that frame), `interpolated` (the line between
+  two hits), `pre_roll` (extrapolated back before the first hit), `flow`
+  (optical-flow propagated) or `coast` (a face held with no flow points).
+- `coco_class` is the detector's COCO id for vehicle and person boxes (7 truck, 5 bus,
+  2 car, 3 motorcycle, 0 person), `null` for faces and plates. A vehicle detection that
+  no plate corroborated is not blurred, so it is not listed.
+- `summary.json`: `area_share` (mean per-frame box area as a fraction of the frame, by
+  kind and source), `share_of_blurred`, `union_share` (pixels actually covered), and
+  `vehicle_aspect_histogram` (w/h of the whole vehicle box on direct detections, split
+  by COCO class).
+- `sheet.png` with `--sheet N`: N evenly spaced frames with the boxes drawn, coloured
+  by kind and labelled by source.
+
 ### Decode backend (NVDEC)
 
 Stage 1 reads every frame and is decode-bound on 4K HEVC. `detect_and_track` /
