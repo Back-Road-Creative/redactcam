@@ -111,6 +111,21 @@ VEHICLE_CLASSES = frozenset({2, 3, 5, 7})
 PERSON_CLASSES = frozenset({0})
 
 
+class ClassedBox(tuple):
+    """An ``(x, y, w, h)`` box that remembers the COCO class id it was detected as.
+
+    A plain tuple to everything else -- equality, hashing, unpacking and indexing are
+    the tuple's own -- so carrying the class through the tracker cannot change a mask.
+    Only ``redactcam explain`` reads ``coco_cls``."""
+
+    coco_cls: int | None
+
+    def __new__(cls, box, coco_cls: int | None = None):
+        self = super().__new__(cls, box)
+        self.coco_cls = coco_cls
+        return self
+
+
 def filter_vehicles(
     boxes: list[Box], frame_h: int, min_height_frac: float, ignore_bottom_frac: float
 ) -> list[Box]:
@@ -463,6 +478,7 @@ class YoloDetector:
 
         boxes: list[list[float]] = []
         scores: list[float] = []
+        classes: list[int] = []  # parallel to ``boxes``: the COCO class of each kept row
         for i in np.where(row_score >= conf)[0]:
             if (
                 row_cls is not None
@@ -480,6 +496,8 @@ class YoloDetector:
                 ]
             )
             scores.append(float(row_score[i]))
+            if row_cls is not None:
+                classes.append(int(row_cls[i]))
         if not boxes:
             return []
 
@@ -498,7 +516,7 @@ class YoloDetector:
                 continue
             box = _xyxy_to_box(x, y, x + bw, y + bh, w0, h0)
             if box is not None:
-                result.append(box)
+                result.append(ClassedBox(box, classes[int(i)]) if row_cls is not None else box)
         return result
 
 
@@ -952,6 +970,9 @@ def detect_and_track(
     checkpoint_overlap_frames: int = CHECKPOINT_OVERLAP_FRAMES,
     progress_every_s: float = 60.0,
     decode: str = "auto",
+    start_frame: int = 0,
+    max_frames: int | None = None,
+    trace: dict | None = None,
 ) -> tuple[dict[int, list[Box]], int, int, int]:
     """One decode pass producing DENSE per-frame privacy boxes.
 
@@ -1067,8 +1088,19 @@ def detect_and_track(
     frame source, see ``redactcam.frames``. Frame indices, sampling and tracking are
     identical for every backend; the chosen one is logged as ``detect: decode=<name>``
     and repeated on the ``detect: done`` line (both only while progress logging is on). A checkpoint resume decodes with cv2.
+
+    ``start_frame`` / ``max_frames`` analyse a window (frame indices stay absolute; the
+    tracker starts cold at ``start_frame``; refused together with ``checkpoint_path``).
+    ``trace``, when a dict, receives ``entries``:
+    the per-frame ``track.BoxEntry`` provenance of exactly the boxes returned, which
+    ``redactcam explain`` reads. Neither changes the returned boxes at their defaults.
     """
     from .track import TrackManager
+
+    if checkpoint_path is not None and (start_frame or max_frames is not None):
+        # A checkpoint resumes from its own frame and unions its boxes in; a window would
+        # silently disagree with it.
+        raise ValueError("checkpoint_path cannot be combined with start_frame/max_frames")
 
     path = Path(video_path)
     cap = cv2.VideoCapture(str(path))
@@ -1109,7 +1141,7 @@ def detect_and_track(
     tracker: TrackManager | None = None
     tiles: list[tuple[int, int, int, int]] | None = None
     n_face = n_plate = 0
-    frame_idx = 0
+    frame_idx = max(0, start_frame)
     # Resume state. `resumed` holds boxes confirmed before the process died; the
     # live tracker below is never seeded from it (track internals are not
     # serialisable), so the overlap re-decode is what repairs the seam.
@@ -1131,6 +1163,7 @@ def detect_and_track(
                 frames_done,
             )
     last_checkpoint = frame_idx
+    stop_at = frame_idx + max_frames if max_frames is not None else None
     meta, frames = iter_frames(path, decode=decode, start_frame=frame_idx, capture=cap)
     total_frames = meta.frame_count
     if progress_every_s > 0:
@@ -1146,6 +1179,8 @@ def detect_and_track(
     boost_run = 0
     try:
         for frame in frames:
+            if stop_at is not None and frame_idx >= stop_at:
+                break
             if tracker is None:  # geometry is constant — build the grid + tracker once
                 h, w = frame.shape[:2]
                 tiles = frame_tiles(w, h, tile_px, tile_overlap)
@@ -1290,13 +1325,16 @@ def detect_and_track(
     # between-detection gaps with a straight line (covers a small object flow can't
     # track between samples). ``face_confirm_min_detections=1`` + no interpolate is a
     # no-op (== frame_boxes).
-    frame_boxes = (
-        tracker.confirmed_frame_boxes(
+    entries = (
+        tracker.confirmed_frame_entries(
             face_confirm_min_detections, interpolate=True, pre_roll=pre_roll_frames
         )
         if tracker is not None
         else {}
     )
+    frame_boxes = {f: [e.box for e in es] for f, es in entries.items()}
+    if trace is not None:
+        trace["entries"] = entries
     if resumed:
         frame_boxes = _union_boxes(resumed, frame_boxes)
     if progress_every_s > 0:

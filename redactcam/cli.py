@@ -14,6 +14,7 @@ from .apply import FFMPEG_INSTALL_HINT, FFMPEG_TOOLS, tool_status
 from .coverage import CLASSES, RequiredClassError
 from .models import DEFAULT_MODELS, ModelSpec
 from .pipeline import CoverageError, redact_video
+from .presets import ROAD_FOOTAGE_BOX_DILATION_PX
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -285,9 +286,88 @@ def _print_coverage(report) -> None:
         print(f"{head} {name:<7} {state:<9} {detail}")
 
 
+def _explain_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="redactcam explain",
+        description=(
+            "Read-only: report every box the blur mask would cover, with its kind, cause and "
+            "detector class, using the same detection and tracking as a normal run. Writes "
+            "boxes.jsonl and summary.json (and sheet.png) to --out; never writes a mask or "
+            "touches the video."
+        ),
+    )
+    p.add_argument("input", type=Path, help="source video")
+    p.add_argument("--out", type=Path, required=True, help="directory for the report")
+    p.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        metavar="KIND=PATH",
+        help="local ONNX file instead of downloading, as for a normal run. Repeatable.",
+    )
+    p.add_argument(
+        "--sheet",
+        type=int,
+        default=0,
+        metavar="N",
+        help="also write N evenly spaced frames, boxes drawn, to sheet.png",
+    )
+    p.add_argument(
+        "--start",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help="analyse from this second (default 0)",
+    )
+    p.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="analyse this many seconds (default: to the end)",
+    )
+    p.add_argument(
+        "--dilation", type=int, default=ROAD_FOOTAGE_BOX_DILATION_PX, metavar="PX",
+        help="flat box dilation in pixels (default: the same as a normal run)",
+    )  # fmt: skip
+    p.add_argument("-v", "--verbose", action="store_true", help="log every stage")
+    return p
+
+
+def _explain(argv: list[str]) -> int:
+    from . import explain
+
+    args = _explain_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        summary = explain.explain_video(
+            args.input,
+            args.out,
+            models=_models(args.model),
+            sheet=args.sheet,
+            start_s=args.start,
+            duration_s=args.duration,
+            box_dilation_px=args.dilation,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"redactcam: {exc}", file=sys.stderr)
+        return 1
+    print(f"boxes     {args.out / 'boxes.jsonl'} ({summary['boxes']} boxes)")
+    print(f"summary   {args.out / 'summary.json'} ({summary['frames_analysed']} frames)")
+    if args.sheet > 0:
+        print(f"sheet     {args.out / 'sheet.png'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw and raw[0] == "explain":
+        return _explain(raw[1:])
     parser = _parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

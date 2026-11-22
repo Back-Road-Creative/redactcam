@@ -43,6 +43,24 @@ _FEAT = dict(maxCorners=64, qualityLevel=0.01, minDistance=4, blockSize=7)
 _COAST_MAX_STEP = 1.5
 
 
+@dataclass(frozen=True)
+class BoxEntry:
+    """One box the mask will blur, with why. ``box`` is the tracker's emitted box (before
+    the timeline's flat dilation). ``source`` is ``detected`` (a detector hit this frame),
+    ``interpolated`` (the line between two bracketing hits), ``pre_roll`` (extrapolated
+    back before the first hit), ``flow`` (optical-flow propagated) or ``coast`` (a face
+    held / velocity-extrapolated with no flow points). ``coco_cls`` is the detector's COCO
+    class id for a vehicle/person track, else None; ``vehicle_box`` is the whole tracked
+    vehicle box the cabin band was cut from, else None."""
+
+    box: Box
+    track_id: int
+    cls: str
+    source: str
+    coco_cls: int | None = None
+    vehicle_box: Box | None = None
+
+
 @dataclass
 class Track:
     """One tracked object. ``box`` is native pixels; ``points`` are LK feature
@@ -199,9 +217,7 @@ class TrackManager:
             return round(self.face_margin_frac * max(box[2], box[3]))
         return 0
 
-    def _motion_pad(
-        self, box: Box, speed: float, floor: int = 0, gain: float | None = None
-    ) -> Box:
+    def _motion_pad(self, box: Box, speed: float, floor: int = 0, gain: float | None = None) -> Box:
         """Grow a tight ``box`` on every side by ``gain × speed`` px (capped at
         ``motion_max``, floored at ``floor``) to cover the flow lag of a fast object —
         the box trails because LK underestimates large motion. The margin scales with
@@ -487,15 +503,15 @@ class TrackManager:
         tight IoU matches settle FIRST; otherwise a far detection's loose distance
         match could steal a track whose own detection overlaps it. Greedy in
         detection order within each pass → deterministic."""
-        boxes = [(cls, self._clamp(raw)) for cls, raw in detections]
+        boxes = [(cls, self._clamp(raw), getattr(raw, "coco_cls", None)) for cls, raw in detections]
         claimed: set[int] = set()
         matched: list[Track | None] = []
-        for cls, box in boxes:
+        for cls, box, _coco in boxes:
             best = self._associate(box, cls, frozenset(claimed), iou_only=True)
             if best is not None:
                 claimed.add(best.track_id)
             matched.append(best)
-        for (cls, box), best in zip(boxes, matched, strict=True):
+        for (cls, box, coco), best in zip(boxes, matched, strict=True):
             if best is None:
                 best = self._associate(box, cls, frozenset(claimed))
                 if best is not None:
@@ -507,6 +523,7 @@ class TrackManager:
                 rec = self._emitted[best.track_id]
                 rec["detections"] += 1
                 rec["anchors"].append(frame_idx)
+                rec["anchor_cls"][frame_idx] = coco
             else:
                 self._tracks.append(Track(self._nid, cls, box, self._seed(box, small), frame_idx))
                 self._emitted[self._nid] = {
@@ -514,6 +531,10 @@ class TrackManager:
                     "detections": 1,
                     "frames": [],
                     "anchors": [frame_idx],
+                    # Explain-only bookkeeping; nothing that builds a mask reads it.
+                    "anchor_cls": {frame_idx: coco},
+                    "modes": {},
+                    "tracked": {},
                 }
                 claimed.add(self._nid)  # a fresh track is this detection's, too
                 self._nid += 1
@@ -550,12 +571,18 @@ class TrackManager:
         boxes = [self._emit_box(t) for t in self._tracks]
         self.frame_boxes[frame_idx] = boxes
         for t, box in zip(self._tracks, boxes, strict=True):
-            self._emitted[t.track_id]["frames"].append((frame_idx, box))
+            rec = self._emitted[t.track_id]
+            rec["frames"].append((frame_idx, box))
+            rec["modes"][frame_idx] = "coast" if t.points is None else "flow"
+            if t.cls == "vehicle":
+                rec["tracked"][frame_idx] = t.box
         self._prev = small
         return boxes
 
     @staticmethod
-    def _interpolate_gaps(frames: dict[int, Box], anchors: list[int]) -> dict[int, Box]:
+    def _interpolate_gaps(
+        frames: dict[int, Box], anchors: list[int], filled: set[int] | None = None
+    ) -> dict[int, Box]:
         """Override a track's between-anchor gap frames with the LINEAR interpolation
         of the bracketing detection boxes, instead of the optical-flow box. Flow fails
         on small low-texture objects (a distant plate, a small face) — the box freezes
@@ -569,6 +596,8 @@ class TrackManager:
             if b - a <= 1 or ba is None or bb is None:
                 continue
             for f in range(a + 1, b):
+                if filled is not None:
+                    filled.add(f)
                 t = (f - a) / (b - a)
                 out[f] = tuple(round(ba[i] + t * (bb[i] - ba[i])) for i in range(4))
         return out
@@ -618,13 +647,14 @@ class TrackManager:
         gain = self.face_motion_gain if (t.cls == "face" and self.face_motion_gain > 0) else None
         return self._motion_pad(t.box, t.speed, self._floor(t.cls, t.box), gain)
 
-    def confirmed_frame_boxes(
+    def confirmed_frame_entries(
         self,
         face_min_detections: int = 1,
         interpolate: bool = False,
         pre_roll: int = 0,
-    ) -> dict[int, list[Box]]:
-        """Dense per-frame map rebuilt from track histories, emitting a FACE track's
+    ) -> dict[int, list[BoxEntry]]:
+        """Same selection as ``confirmed_frame_boxes`` (which is built from this), but each box
+        carries its ``BoxEntry`` provenance. Dense per-frame map rebuilt from track histories, emitting a FACE track's
         boxes only once it accumulated ``>= face_min_detections`` associated detections.
         A small clear face (the recall target) re-detects across consecutive samples as
         it persists → many detections → kept, INCLUDING the low-conf frames before the
@@ -646,8 +676,8 @@ class TrackManager:
         streaming dedup."""
         from collections import defaultdict
 
-        fb: dict[int, list[Box]] = defaultdict(list)
-        for rec in self._emitted.values():
+        fb: dict[int, list[BoxEntry]] = defaultdict(list)
+        for tid, rec in self._emitted.items():
             if rec["cls"] == "face" and rec["detections"] < face_min_detections:
                 continue
             # A vehicle is cabin-blurred only once a license plate corroborated it as a
@@ -656,16 +686,21 @@ class TrackManager:
             if rec["cls"] == "vehicle" and not rec.get("has_plate"):
                 continue
             base = dict(rec["frames"])
+            interpolated: set[int] = set()
             frames = (
-                self._interpolate_gaps(base, rec["anchors"])
+                self._interpolate_gaps(base, rec["anchors"], interpolated)
                 if interpolate and len(rec["anchors"]) >= 2
                 else dict(base)
             )
+            pre_rolled: set[int] = set()
             if pre_roll > 0:
                 for f, box in self._pre_roll_boxes(base, rec["anchors"], pre_roll).items():
-                    frames.setdefault(f, box)  # only ADD head frames, never overwrite
+                    if f not in frames:  # only ADD head frames, never overwrite
+                        frames[f] = box
+                        pre_rolled.add(f)
+            anchors = set(rec["anchors"])
             for f, box in frames.items():
-                fb[f].append(box)
+                fb[f].append(self._entry(tid, rec, f, box, anchors, interpolated, pre_rolled))
         if self.dedup_iou <= 0:
             return dict(fb)
         # Post-hoc per-frame dedup: interpolation / pre-roll can reconstruct two
@@ -674,11 +709,50 @@ class TrackManager:
         # tail tracks of the same exiting face). Drop a box overlapping a LARGER kept
         # box by more than ``dedup_iou`` — keep the larger so coverage never shrinks;
         # the high threshold leaves two genuinely distinct (crossing) faces.
-        out: dict[int, list[Box]] = {}
-        for f, boxes in fb.items():
-            kept: list[Box] = []
-            for b in sorted(boxes, key=lambda b: -b[2] * b[3]):
-                if not any(_iou(b, k) > self.dedup_iou for k in kept):
-                    kept.append(b)
+        out: dict[int, list[BoxEntry]] = {}
+        for f, entries in fb.items():
+            kept: list[BoxEntry] = []
+            for e in sorted(entries, key=lambda e: -e.box[2] * e.box[3]):
+                if not any(_iou(e.box, k.box) > self.dedup_iou for k in kept):
+                    kept.append(e)
             out[f] = kept
         return out
+
+    @staticmethod
+    def _entry(
+        tid: int,
+        rec: dict,
+        f: int,
+        box: Box,
+        anchors: set[int],
+        interpolated: set[int],
+        pre_rolled: set[int],
+    ) -> BoxEntry:
+        """Provenance of one emitted box (see ``BoxEntry``). Explain-only."""
+        if f in anchors:
+            source = "detected"
+        elif f in interpolated:
+            source = "interpolated"
+        elif f in pre_rolled:
+            source = "pre_roll"
+        else:
+            source = rec.get("modes", {}).get(f, "flow")
+        coco = None
+        classes = rec.get("anchor_cls", {})
+        known = sorted(classes)
+        if known:  # the class of the latest detection at or before f, else the first
+            at = [a for a in known if a <= f]
+            coco = classes[at[-1] if at else known[0]]
+        return BoxEntry(box, tid, rec["cls"], source, coco, rec.get("tracked", {}).get(f))
+
+    def confirmed_frame_boxes(
+        self,
+        face_min_detections: int = 1,
+        interpolate: bool = False,
+        pre_roll: int = 0,
+    ) -> dict[int, list[Box]]:
+        """Dense per-frame map rebuilt from track histories; see ``confirmed_frame_entries``
+        for the selection rules (face confirmation, vehicle plate corroboration,
+        interpolation, pre-roll, post-hoc dedup). Boxes only, in the mask's order."""
+        entries = self.confirmed_frame_entries(face_min_detections, interpolate, pre_roll)
+        return {f: [e.box for e in es] for f, es in entries.items()}
