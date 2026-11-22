@@ -13,6 +13,10 @@ Outputs, all under ``out_dir``:
   histogram split by COCO class.
 * ``sheet.png``    (with ``sheet=N``) N evenly spaced frames with the boxes drawn.
 
+Cold start: with ``--start`` the tracker begins cold at that frame (it has no history
+before it), so the first frames of a window can differ from the same frames in a full
+run. Boxes the tracker pre-rolls to frames before the window are dropped, never counted.
+
 Boxes are the DILATED boxes the mask uses (``x, y, w, h``); ``raw`` is the same box
 before the flat dilation.
 """
@@ -93,6 +97,8 @@ def explain_video(
     cabin_frac = float(opts.get("track_cabin_frac", 0.0))
     records: list[dict] = []
     for f in sorted(tl.frame_boxes):
+        if not start <= f < end:  # pre-roll can reach before the window; not analysed
+            continue
         es, boxes = entries[f], tl.frame_boxes[f]
         if len(es) != len(boxes):  # fail closed: never explain boxes the mask does not use
             raise RuntimeError(f"frame {f}: {len(es)} explained boxes vs {len(boxes)} mask boxes")

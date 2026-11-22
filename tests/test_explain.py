@@ -242,3 +242,41 @@ def test_cli_routes_explain(tmp_path, monkeypatch, capsys):
     assert seen["sheet"] == 4 and seen["start_s"] == 1.5 and seen["duration_s"] == 2.0
     assert seen["models"]["vehicle"] == ModelSpec(name="vehicle", path="/m/v.onnx")
     assert Path(seen["out"]) == tmp_path
+
+
+def test_frames_before_start_from_pre_roll_are_neither_written_nor_counted(tmp_path, monkeypatch):
+    from redactcam.track import BoxEntry
+
+    video = _video(tmp_path)  # 12 fps; --start 1.0 s is frame 12, --duration 0.5 s ends at 18
+    box = (50, 50, 40, 40)
+
+    def fake(path, start_frame=0, max_frames=None, trace=None, **_o):
+        frames = range(start_frame - 3, start_frame + max_frames)  # pre-roll reaches back
+        trace["entries"] = {f: [BoxEntry(box, 1, "face", "pre_roll")] for f in frames}
+        return {f: [box] for f in frames}, start_frame + max_frames, 0, 0
+
+    monkeypatch.setattr(explain, "detect_and_track", fake)
+    s = explain.explain_video(video, tmp_path / "out", start_s=1.0, duration_s=0.5)
+    frames = [r["frame"] for r in _read(tmp_path / "out")]
+    assert sorted(set(frames)) == list(range(12, 18))
+    assert s["boxes"] == len(frames) == 6 and s["frames_analysed"] == 6
+
+
+def test_checkpoint_with_a_window_is_refused(tmp_path):
+    video = _video(tmp_path)
+    for kw in ({"start_frame": 4}, {"max_frames": 5}):
+        with pytest.raises(ValueError, match="checkpoint_path"):
+            pl.detect_and_track(video, checkpoint_path=tmp_path / "ck.json", **kw)
+
+
+def test_cli_dilation_defaults_to_the_mask_default_and_is_passed_through(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        explain,
+        "explain_video",
+        lambda *a, **kw: seen.append(kw) or {"frames_analysed": 0, "boxes": 0},
+    )
+    assert cli.main(["explain", "a.mp4", "--out", str(tmp_path)]) == 0
+    assert cli.main(["explain", "a.mp4", "--out", str(tmp_path), "--dilation", "20"]) == 0
+    assert seen[0]["box_dilation_px"] == pl.ROAD_FOOTAGE_BOX_DILATION_PX
+    assert seen[1]["box_dilation_px"] == 20

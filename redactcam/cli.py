@@ -14,6 +14,7 @@ from .apply import FFMPEG_INSTALL_HINT, FFMPEG_TOOLS, tool_status
 from .coverage import CLASSES, RequiredClassError
 from .models import DEFAULT_MODELS, ModelSpec
 from .pipeline import CoverageError, redact_video
+from .presets import ROAD_FOOTAGE_BOX_DILATION_PX
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -104,9 +105,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the installed code/native-runtime identity as JSON and exit",
     )
-    p.add_argument(
-        "--expect-version", metavar="X.Y.Z", help="exit 1 unless the installed version matches"
-    )
+    p.add_argument("--expect-version", metavar="X.Y.Z", help="exit 1 unless the installed version matches")
     p.add_argument(
         "--expect-code-sha256",
         metavar="HEX",
@@ -190,9 +189,7 @@ def _check_deps(
         print(f"opencv          {cv2.__version__}")
         print(f"onnxruntime     {ort.__version__}")
         print(f"providers       {', '.join(providers)}")
-        print(
-            f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}"
-        )
+        print(f"session options intra={opts.intra_op_num_threads} inter={opts.inter_op_num_threads}")
         diag.update(opencv=cv2.__version__, onnxruntime=ort.__version__, providers=providers)
         # The provider LIST above is what the wheel advertises; this line is the
         # decision a detector makes from it — and it is where a GPU build that lost
@@ -271,9 +268,7 @@ def _models(pairs: list[str]) -> dict[str, ModelSpec]:
         if not path:
             raise SystemExit(f"--model expects KIND=PATH, got {pair!r}")
         if kind not in DEFAULT_MODELS:
-            raise SystemExit(
-                f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}"
-            )
+            raise SystemExit(f"unknown model kind {kind!r}; expected one of {sorted(DEFAULT_MODELS)}")
         out[kind] = ModelSpec(name=kind, path=path)
     return out
 
@@ -331,6 +326,10 @@ def _explain_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="analyse this many seconds (default: to the end)",
     )
+    p.add_argument(
+        "--dilation", type=int, default=ROAD_FOOTAGE_BOX_DILATION_PX, metavar="PX",
+        help="flat box dilation in pixels (default: the same as a normal run)",
+    )  # fmt: skip
     p.add_argument("-v", "--verbose", action="store_true", help="log every stage")
     return p
 
@@ -351,6 +350,7 @@ def _explain(argv: list[str]) -> int:
             sheet=args.sheet,
             start_s=args.start,
             duration_s=args.duration,
+            box_dilation_px=args.dilation,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"redactcam: {exc}", file=sys.stderr)

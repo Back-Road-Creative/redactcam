@@ -319,13 +319,16 @@ detection identity matters.
 ### Explain why the blur covers what it covers
 
 ```
-redactcam explain clip.mp4 --out explain/ [--sheet 12] [--start 30 --duration 20] [--model KIND=PATH]
+redactcam explain clip.mp4 --out explain/ [--sheet 12] [--start 30 --duration 20] [--dilation PX] [--model KIND=PATH]
 ```
 
 A read-only diagnostic for over-blur. It runs the same detection, tracking and
 dilation a normal run uses (the `ROAD_FOOTAGE` preset, `detect_and_track`, then
 `build_timeline`) and reports the exact boxes the mask would draw. It never writes a
-mask and never touches the video. In `--out`:
+mask and never touches the video. `--dilation PX` sets the flat box dilation (default:
+the same value a normal run uses). With `--start`, the tracker starts cold at that
+frame, so the first frames of the window can differ from the same frames in a full
+run; boxes pre-rolled to before `--start` are not written or counted. In `--out`:
 
 - `boxes.jsonl`: one record per box per frame: `frame`, `kind` (`face`, `plate`,
   `person`, `vehicle_cabin`), `source`, `coco_class`, `x y w h` (the dilated box the

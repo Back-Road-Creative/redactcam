@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
   vehicle aspect histogram by class and an optional contact sheet. It runs the mask's own
   detection and tracking, never writes a mask, and the mask output is unchanged (the COCO
   class rides on a tuple subclass that compares and hashes as the plain box).
+  `--dilation PX` defaults to a normal run's value; a `--start` window starts the tracker
+  cold and drops boxes pre-rolled before it; `detect_and_track` refuses `checkpoint_path`
+  with `start_frame`/`max_frames`. A golden fixture from the pre-explain code pins the mask.
 
 ### Changed
 

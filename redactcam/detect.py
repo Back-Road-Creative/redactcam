@@ -277,7 +277,8 @@ class CenterFaceDetector:
             from deface.centerface import CenterFace
         except ImportError as exc:  # pragma: no cover - depends on the extra
             raise ModelUnavailableError(
-                "CenterFace fallback needs the optional extra: pip install 'redactcam[centerface]'"
+                "CenterFace fallback needs the optional extra: "
+                "pip install 'redactcam[centerface]'"
             ) from exc
 
         self._net = CenterFace(in_shape=infer_shape)
@@ -543,7 +544,9 @@ def build_detectors(
     than returning something that finds nothing. A missing PLATE model only warns
     and disables plates — the caller decides whether that is fatal for its use
     case. ``threads`` caps each ONNX session's intra-op pool (0 = all cores)."""
-    face_detector = build_face_detector(face_model_path, face_infer_shape, infer_size, iou, threads)
+    face_detector = build_face_detector(
+        face_model_path, face_infer_shape, infer_size, iou, threads
+    )
     plate_detector = build_plate_detector(
         plate_model_path, infer_size, iou, plate_min_aspect, plate_max_aspect, threads
     )
@@ -566,7 +569,9 @@ def build_plate_detector(
     plate_path = Path(plate_model_path).expanduser() if plate_model_path else None
     if plate_path and plate_path.exists():
         logger.info("plate model loaded from %s", plate_path)
-        return YoloDetector(plate_path, infer_size, iou, min_aspect, threads, max_aspect=max_aspect)
+        return YoloDetector(
+            plate_path, infer_size, iou, min_aspect, threads, max_aspect=max_aspect
+        )
     logger.warning(
         "no plate model at %r — plate detection disabled",
         str(plate_path) if plate_path else None,
@@ -1085,11 +1090,17 @@ def detect_and_track(
     and repeated on the ``detect: done`` line (both only while progress logging is on). A checkpoint resume decodes with cv2.
 
     ``start_frame`` / ``max_frames`` analyse a window (frame indices stay absolute; the
-    tracker starts cold at ``start_frame``). ``trace``, when a dict, receives ``entries``:
+    tracker starts cold at ``start_frame``; refused together with ``checkpoint_path``).
+    ``trace``, when a dict, receives ``entries``:
     the per-frame ``track.BoxEntry`` provenance of exactly the boxes returned, which
     ``redactcam explain`` reads. Neither changes the returned boxes at their defaults.
     """
     from .track import TrackManager
+
+    if checkpoint_path is not None and (start_frame or max_frames is not None):
+        # A checkpoint resumes from its own frame and unions its boxes in; a window would
+        # silently disagree with it.
+        raise ValueError("checkpoint_path cannot be combined with start_frame/max_frames")
 
     path = Path(video_path)
     cap = cv2.VideoCapture(str(path))
