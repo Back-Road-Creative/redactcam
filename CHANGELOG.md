@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`plate_vehicle_conf`** on `detect_and_track` (0 = off, unchanged): a plate blurs only once
+  its center sits inside a vehicle box, from the vehicle model run at this confidence with no
+  size or bottom-strip gate on every frame that finds a plate, or from a tracked vehicle. A
+  fuel sign's logo or a yield sign that the plate model boxes at plate shape and size has no
+  vehicle around it, so it stays readable. Corroboration is sticky and retroactive for the
+  plate's whole track. With no vehicle model every plate blurs as before, and a checkpoint
+  snapshot keeps uncorroborated plates so a resume never leaves early frames bare.
+  `TrackManager(plate_requires_vehicle=...)` and `step(..., vehicle_hints=...)` carry it.
 - **`redactcam explain`**: a read-only diagnostic that reports every box the blur mask would
   cover, per frame, with its kind, its cause (detected, interpolated, pre-roll, flow, coast)
   and the detector's COCO class id for vehicles and people, plus a blurred-area summary, a

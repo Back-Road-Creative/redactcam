@@ -41,6 +41,10 @@ _FEAT = dict(maxCorners=64, qualityLevel=0.01, minDistance=4, blockSize=7)
 # is LK latching onto background (a textureless face → static grid lines), so we
 # keep the prior heading rather than coast on that noise.
 _COAST_MAX_STEP = 1.5
+# A vehicle box is grown by this fraction of its own width and height before a plate
+# center is tested against it (``_corroborate_plates``): the detector's car box often
+# stops short of the bumper, where the plate sits.
+_PLATE_VEHICLE_PAD = 0.1
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,7 @@ class TrackManager:
         assoc_min_gate: int = 0,
         dedup_iou: float = 0.0,
         cabin_frac: float = 0.0,
+        plate_requires_vehicle: bool = False,
         rng_seed: int = 0,
     ):
         self.w, self.h = frame_w, frame_h
@@ -164,6 +169,10 @@ class TrackManager:
         self.assoc_gain = max(0.0, assoc_motion_gain)
         self.assoc_min_gate = max(0, assoc_min_gate)
         self.cabin_frac = max(0.0, cabin_frac)
+        # A plate track is emitted only once its center fell inside a vehicle box
+        # (``_corroborate_plates``): a fuel-station logo or a road sign the plate model
+        # scores like a plate has no car around it, so it stays readable.
+        self.plate_requires_vehicle = bool(plate_requires_vehicle)
         self.iou_match = iou_match
         self.scale_min, self.scale_max = scale_min, scale_max
         self.min_inliers = min_inliers
@@ -494,6 +503,28 @@ class TrackManager:
                     self._emitted[t.track_id]["has_plate"] = True
                     break
 
+    def _corroborate_plates(self, vehicle_hints) -> None:
+        """Mark a plate track vehicle-corroborated once its center falls inside a vehicle
+        box: a live vehicle track or one of ``vehicle_hints`` (the vehicle detector's
+        boxes on this frame at its own, lower plate-corroboration confidence, with no size
+        or bottom-strip gate). Sticky and retroactive, like ``_corroborate_vehicles``: once
+        seen on a car, the plate blurs for its whole track, frames before included. Each
+        vehicle box is grown by ``_PLATE_VEHICLE_PAD`` of its size, so a plate at a
+        bumper's edge still counts. The mirror of ``_corroborate_vehicles``: a real plate
+        sits on a vehicle; a sign or logo the plate model misreads does not."""
+        boxes = list(vehicle_hints or []) + [t.box for t in self._tracks if t.cls == "vehicle"]
+        if not boxes:
+            return
+        for t in self._tracks:
+            if t.cls != "plate" or self._emitted[t.track_id].get("has_vehicle"):
+                continue
+            cx, cy = self._center(t.box)
+            for vx, vy, vw, vh in boxes:
+                px, py = vw * _PLATE_VEHICLE_PAD, vh * _PLATE_VEHICLE_PAD
+                if vx - px <= cx <= vx + vw + px and vy - py <= cy <= vy + vh + py:
+                    self._emitted[t.track_id]["has_vehicle"] = True
+                    break
+
     def _assimilate(self, frame_idx: int, small: np.ndarray, detections) -> None:
         """Snap a matching track to each detection (resets flow drift) or spawn
         a new track, then retire any ghost a fresh detection supersedes. ONE
@@ -547,9 +578,12 @@ class TrackManager:
         to, so the caller boosts plate detection while this exceeds a threshold."""
         return max((t.speed for t in self._tracks if t.cls == cls), default=0.0)
 
-    def step(self, frame_idx: int, gray: np.ndarray, detections=None) -> list[Box]:
+    def step(
+        self, frame_idx: int, gray: np.ndarray, detections=None, vehicle_hints=None
+    ) -> list[Box]:
         """Advance one frame. ``detections`` is ``[(cls, box), ...]`` on sample
-        frames (``None``/empty otherwise). Returns this frame's active boxes — each
+        frames (``None``/empty otherwise). ``vehicle_hints`` are untracked vehicle boxes
+        used only to corroborate plates (``_corroborate_plates``). Returns this frame's active boxes — each
         the tight tracked box plus its motion margin."""
         small = self._small(gray)
         if self._prev is not None:
@@ -568,6 +602,7 @@ class TrackManager:
             self._assimilate(frame_idx, small, detections)
         self._dedup_overlapping()
         self._corroborate_vehicles()
+        self._corroborate_plates(vehicle_hints)
         boxes = [self._emit_box(t) for t in self._tracks]
         self.frame_boxes[frame_idx] = boxes
         for t, box in zip(self._tracks, boxes, strict=True):
@@ -652,6 +687,7 @@ class TrackManager:
         face_min_detections: int = 1,
         interpolate: bool = False,
         pre_roll: int = 0,
+        require_plate_vehicle: bool | None = None,
     ) -> dict[int, list[BoxEntry]]:
         """Same selection as ``confirmed_frame_boxes`` (which is built from this), but each box
         carries its ``BoxEntry`` provenance. Dense per-frame map rebuilt from track histories, emitting a FACE track's
@@ -673,12 +709,19 @@ class TrackManager:
         When ``dedup_iou`` is set, a final per-frame pass drops a box overlapping a
         larger kept box by more than it — the post-hoc catch for two near-identical
         reconstructed boxes of one object whose live tracks never co-existed for the
-        streaming dedup."""
+        streaming dedup. With ``plate_requires_vehicle`` (or ``require_plate_vehicle``,
+        which overrides it for one call) a plate track never seen inside a vehicle box is
+        dropped: a sign or logo the plate model misreads, not a car's plate."""
         from collections import defaultdict
 
+        need_vehicle = (
+            self.plate_requires_vehicle if require_plate_vehicle is None else require_plate_vehicle
+        )
         fb: dict[int, list[BoxEntry]] = defaultdict(list)
         for tid, rec in self._emitted.items():
             if rec["cls"] == "face" and rec["detections"] < face_min_detections:
+                continue
+            if need_vehicle and rec["cls"] == "plate" and not rec.get("has_vehicle"):
                 continue
             # A vehicle is cabin-blurred only once a license plate corroborated it as a
             # real road car (see _corroborate_vehicles) — a plate-less roadside billboard
@@ -750,9 +793,12 @@ class TrackManager:
         face_min_detections: int = 1,
         interpolate: bool = False,
         pre_roll: int = 0,
+        require_plate_vehicle: bool | None = None,
     ) -> dict[int, list[Box]]:
         """Dense per-frame map rebuilt from track histories; see ``confirmed_frame_entries``
-        for the selection rules (face confirmation, vehicle plate corroboration,
+        for the selection rules (face confirmation, vehicle and plate corroboration,
         interpolation, pre-roll, post-hoc dedup). Boxes only, in the mask's order."""
-        entries = self.confirmed_frame_entries(face_min_detections, interpolate, pre_roll)
+        entries = self.confirmed_frame_entries(
+            face_min_detections, interpolate, pre_roll, require_plate_vehicle
+        )
         return {f: [e.box for e in es] for f, es in entries.items()}

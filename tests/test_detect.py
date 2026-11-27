@@ -620,6 +620,57 @@ class TestDetectAndTrack:
         fb0, *_ = detect_and_track(video, track_cabin_frac=0.0, vehicle_model_path="x", **kw)
         assert not any(b == cabin for boxes in fb0.values() for b in boxes)
 
+    def test_plate_vehicle_conf_blurs_a_plate_only_on_a_vehicle(self, tmp_path, monkeypatch):
+        """With ``plate_vehicle_conf`` set, a plate-shaped sign with no vehicle around it
+        (a fuel sign's logo, a yield sign) is left readable, while a plate inside the
+        vehicle model's box at that confidence still blurs, even with the cabin blur off.
+        Without a vehicle model, every plate still blurs."""
+        car = (40, 30, 120, 80)
+        seen_conf = []
+
+        class _FakeVehicle:
+            def detect(self, frame, conf):
+                seen_conf.append(conf)
+                return [car]
+
+        monkeypatch.setattr(detect, "build_vehicle_detector", lambda *a, **k: _FakeVehicle())
+        video = _make_moving_video(tmp_path)
+        kw = dict(
+            sample_fps=3.0,
+            plate_model_path=None,
+            tile_px=9999,
+            track_downscale=1,
+            track_lk_win=15,
+            track_lk_levels=2,
+            track_max_horizon_frames=60,
+            vehicle_model_path="x",
+        )
+
+        def covers(fb, pt):
+            return any(
+                b[0] <= pt[0] <= b[0] + b[2] and b[1] <= pt[1] <= b[1] + b[3]
+                for boxes in fb.values()
+                for b in boxes
+            )
+
+        sign, plate = (200, 20, 40, 16), (70, 90, 40, 15)
+        sign_c, plate_c = (220, 28), (90, 97)
+        monkeypatch.setattr(detect, "detect_plates", lambda *a, **k: [sign, plate])
+        fb, *_ = detect_and_track(video, plate_vehicle_conf=0.25, **kw)
+        assert covers(fb, plate_c)  # on the car: blurred
+        assert not covers(fb, sign_c)  # no car around it: readable
+        assert seen_conf and set(seen_conf) == {0.25}  # cabin blur off: hint pass only
+        assert not any(b == (40, 30, 120, 40) for bs in fb.values() for b in bs)  # no cabin
+
+        # off (the default): both blur, as before
+        fb_off, *_ = detect_and_track(video, **kw)
+        assert covers(fb_off, plate_c) and covers(fb_off, sign_c)
+
+        # no vehicle model: nothing to corroborate against, so every plate blurs
+        monkeypatch.setattr(detect, "build_vehicle_detector", lambda *a, **k: None)
+        fb_none, *_ = detect_and_track(video, plate_vehicle_conf=0.25, **kw)
+        assert covers(fb_none, plate_c) and covers(fb_none, sign_c)
+
     def test_two_co_present_cars_are_both_cabin_blurred_every_frame(
         self, tmp_path, monkeypatch
     ):
