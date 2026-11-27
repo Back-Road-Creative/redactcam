@@ -692,3 +692,55 @@ def test_pre_roll_covers_head_before_first_detection():
     head = [f for f in range(5) if f in rolled]
     assert head  # head covered with pre-roll
     assert rolled[head[-1]][0][0] < tm.frame_boxes[5][0][0]  # pre-rolled box is left of f5
+
+
+def _plate_tm(require: bool, plate_box, vehicle_box=None, hints=None):
+    tm = TrackManager(W * 8, H * 8, downscale=1, cabin_frac=0.6, plate_requires_vehicle=require)
+    tm._tracks = [Track(1, "plate", plate_box, None, 5)]
+    tm._emitted = {1: {"cls": "plate", "detections": 1, "anchors": [5], "frames": [(5, plate_box)]}}
+    if vehicle_box is not None:
+        tm._tracks.append(Track(0, "vehicle", vehicle_box, None, 5))
+        tm._emitted[0] = {"cls": "vehicle", "detections": 1, "anchors": [5], "frames": []}
+    tm._corroborate_plates(hints)
+    return tm
+
+
+def test_sign_shaped_like_a_plate_with_no_vehicle_is_not_blurred():
+    """Galley Head, 2025-09-20: the plate model boxed a SPAR logo on a fuel sign at
+    (312, 1029, 271, 128) and a yield sign near (212, 991, 400, 212). Neither has a
+    vehicle around it, so with plate corroboration on, neither is blurred."""
+    for sign in [(312, 1029, 271, 128), (220, 999, 384, 196)]:
+        tm = _plate_tm(True, sign)
+        assert not tm._emitted[1].get("has_vehicle")
+        assert tm.confirmed_frame_boxes() == {}
+
+
+def test_plate_on_a_vehicle_is_still_blurred():
+    """A real plate sits inside a vehicle box: a tracked vehicle, a hint box from the
+    lower-confidence vehicle pass, or a truck whose box stops just short of its bumper."""
+    plate = (1250, 1100, 200, 80)
+    on_track = _plate_tm(True, plate, vehicle_box=(1000, 800, 600, 400))
+    on_hint = _plate_tm(True, plate, hints=[(1000, 800, 600, 400)])
+    # the plate's center (1350, 1140) is below a truck box ending at y=1120, inside its 10% pad
+    on_bumper = _plate_tm(True, plate, hints=[(900, 520, 900, 600)])
+    for tm in (on_track, on_hint, on_bumper):
+        assert tm._emitted[1]["has_vehicle"] is True
+        assert tm.confirmed_frame_boxes()[5] == [plate]
+
+
+def test_plate_corroboration_is_sticky_and_retroactive():
+    """Once a plate is seen on a vehicle, its whole track blurs, frames before included."""
+    plate = (1250, 1100, 200, 80)
+    tm = _plate_tm(True, plate)
+    tm._emitted[1]["frames"] = [(3, plate), (4, plate), (5, plate)]
+    assert tm.confirmed_frame_boxes() == {}
+    tm._corroborate_plates([(1000, 800, 600, 400)])
+    tm._corroborate_plates([])  # the vehicle leaving the frame never un-corroborates it
+    assert sorted(tm.confirmed_frame_boxes()) == [3, 4, 5]
+
+
+def test_plate_corroboration_off_keeps_every_plate():
+    """Off by default, and a per-call override keeps every plate (checkpoint snapshots)."""
+    sign = (312, 1029, 271, 128)
+    assert _plate_tm(False, sign).confirmed_frame_boxes()[5] == [sign]
+    assert _plate_tm(True, sign).confirmed_frame_boxes(require_plate_vehicle=False)[5] == [sign]

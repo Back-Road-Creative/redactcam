@@ -960,6 +960,7 @@ def detect_and_track(
     vehicle_conf: float = 0.35,
     vehicle_min_height_frac: float = 0.0,
     vehicle_ignore_bottom_frac: float = 0.0,
+    plate_vehicle_conf: float = 0.0,
     track_person: bool = False,
     person_model_path: str | Path | None = None,
     person_conf: float = 0.35,
@@ -1058,6 +1059,16 @@ def detect_and_track(
     built only when ``track_cabin_frac`` > 0 and the model resolves; cars are large so it
     runs whole-frame (no tiling) on the base cadence. See ``TrackManager``.
 
+    ``plate_vehicle_conf`` (0 = off) makes a plate blur only once its center sits inside
+    a vehicle box. On every frame that finds a plate, the vehicle model also runs at this
+    confidence with no size or bottom-strip gate, and those boxes (plus any tracked
+    vehicle's) corroborate the plate's track, retroactively for its whole life. A fuel
+    sign's logo or a yield sign that the plate model boxes at plate shape and size has no
+    vehicle around it, so it stays readable. It needs the vehicle model; without one,
+    every plate blurs as before. The vehicle model runs on these frames even when the
+    cabin blur is off, but its boxes are tracked (cabin-blurred) only when
+    ``track_cabin_frac`` > 0.
+
     ``face_sample_fps`` (default = ``sample_fps``) gives faces their OWN, denser cadence:
     a small low-texture pedestrian face can't be optical-flow-tracked between sparse
     samples (its box freezes while it walks out of frame), so detecting it more often
@@ -1121,9 +1132,18 @@ def detect_and_track(
     # model resolves; cars are large so it runs whole-frame (no tiling).
     vehicle_detector = (
         build_vehicle_detector(vehicle_model_path, plate_infer_size, plate_iou, plate_threads)
-        if track_cabin_frac > 0
+        if track_cabin_frac > 0 or plate_vehicle_conf > 0
         else None
     )
+    # ``plate_vehicle_conf`` > 0: a plate blurs only once its center sat inside a vehicle
+    # box, so a road sign or shop logo the plate model scores like a plate stays readable.
+    # With no vehicle model there is nothing to corroborate against, so every plate blurs.
+    plates_need_vehicle = plate_vehicle_conf > 0 and vehicle_detector is not None
+    if plate_vehicle_conf > 0 and vehicle_detector is None:
+        logger.warning(
+            "plate_vehicle_conf is set but no vehicle model resolved — every plate blurs"
+        )
+    track_vehicles = track_cabin_frac > 0
     # Whole-person detector is built only when person blur is on AND a model resolves;
     # people are large/high-confidence, so it runs whole-frame (no tiling) like vehicles.
     person_detector = (
@@ -1209,6 +1229,7 @@ def detect_and_track(
                     assoc_min_gate=track_assoc_min_gate_px,
                     dedup_iou=track_dedup_iou,
                     cabin_frac=track_cabin_frac,
+                    plate_requires_vehicle=plates_need_vehicle,
                 )
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Faces and plates run on INDEPENDENT cadences: faces at ``face_step``
@@ -1228,13 +1249,18 @@ def detect_and_track(
             # the box onto the road and the cabin lands off the windshield — so when the
             # boost is armed (the plate is fast = the car is close) re-detect the vehicle
             # EVERY frame, snapping the box to ground truth instead of flow-tracking it.
-            do_vehicle = vehicle_detector is not None and (frame_idx % step == 0 or boost_run > 0)
+            do_vehicle = (
+                track_vehicles
+                and vehicle_detector is not None
+                and (frame_idx % step == 0 or boost_run > 0)
+            )
             # People are detected on the base cadence too (a standing operator is slow, so
             # optical flow bridges the gaps); the whole box is blurred, not just the head.
             do_person = person_detector is not None and (frame_idx % step == 0 or boost_run > 0)
             plates: list[Box] = []
             vehicles: list[Box] = []
             persons: list[Box] = []
+            hints: list[Box] = []
             if do_face or do_plate or do_vehicle or do_person:
                 memo = FrameMemo()
                 faces = (
@@ -1262,6 +1288,10 @@ def detect_and_track(
                         person_min_height_frac,
                         0.0,
                     )
+                if plates_need_vehicle and plates:
+                    # Untracked, ungated vehicle boxes at the plate-corroboration
+                    # confidence: they only decide whether a plate sits on a vehicle.
+                    hints = detect_shared(vehicle_detector, frame, plate_vehicle_conf, memo)
                 n_face += len(faces)
                 n_plate += len(plates)
                 dets = (
@@ -1270,7 +1300,7 @@ def detect_and_track(
                     + [("vehicle", b) for b in vehicles]
                     + [("person", b) for b in persons]
                 )
-                tracker.step(frame_idx, gray, dets)
+                tracker.step(frame_idx, gray, dets, vehicle_hints=hints)
             else:
                 tracker.step(frame_idx, gray, None)
             # Boost (per-frame re-detection) arms on a fast OR just-seen plate/vehicle.
@@ -1309,8 +1339,13 @@ def detect_and_track(
                 and tracker is not None
                 and frame_idx - last_checkpoint >= checkpoint_every_frames
             ):
+                # A plate not yet seen on a vehicle is kept here: after a resume the
+                # tracker starts fresh, so dropping it would leave its early frames bare.
                 snapshot = tracker.confirmed_frame_boxes(
-                    face_confirm_min_detections, interpolate=True, pre_roll=pre_roll_frames
+                    face_confirm_min_detections,
+                    interpolate=True,
+                    pre_roll=pre_roll_frames,
+                    require_plate_vehicle=False,
                 )
                 _write_checkpoint(
                     ckpt_path, fingerprint, frame_idx, _union_boxes(resumed, snapshot)
